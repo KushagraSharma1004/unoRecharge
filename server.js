@@ -19,7 +19,7 @@ app.use(express.urlencoded({
 
 Cashfree.XClientId = process.env.CLIENT_ID;
 Cashfree.XClientSecret = process.env.CLIENT_SECRET;
-Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION;
+Cashfree.XEnvironment = Cashfree.Environment.SANDBOX;
 
 
 function generateOrderId() {
@@ -79,7 +79,7 @@ app.post('/verify', async (req, res) => {
             orderId
         } = req.body;
 
-        Cashfree.PGOrderFetchPayments("2025-01-01", orderId).then((response) => {
+        Cashfree.PGOrderFetchPayments("2025-03-27", orderId).then((response) => {
 
             res.json(response.data);
         }).catch(error => {
@@ -92,6 +92,7 @@ app.post('/verify', async (req, res) => {
     }
 })
 
-app.listen(91230, () => {
-    console.log('Server is running on port 91230');
-})
+const PORT = process.env.PORT || 9123;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
