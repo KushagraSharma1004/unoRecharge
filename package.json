@@ -1,5 +1,5 @@
 {
-  "name": "agar.iopart1",
+  "name": "USVendorsPaymentBackend",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {

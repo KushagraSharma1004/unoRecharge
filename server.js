@@ -11,7 +11,7 @@ app.use(express.json());
 // Cashfree configuration
 Cashfree.XClientId = process.env.CLIENT_ID;
 Cashfree.XClientSecret = process.env.CLIENT_SECRET;
-Cashfree.XEnvironment = Cashfree.Environment.SANDBOX; // Changed to PRODUCTION
+Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Changed to PRODUCTION
 
 // Generate order ID
 function generateOrderId() {
