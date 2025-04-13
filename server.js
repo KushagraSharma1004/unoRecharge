@@ -3,6 +3,7 @@ const cors = require('cors');
 const crypto = require('crypto');
 const { Cashfree } = require('cashfree-pg');
 require('dotenv').config();
+import { manualTrigger } from './dailyDeduction.js';
 
 const app = express();
 app.use(cors());
@@ -13,10 +14,6 @@ Cashfree.XClientId = process.env.CLIENT_ID;
 Cashfree.XClientSecret = process.env.CLIENT_SECRET;
 Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Changed to PRODUCTION
 
-// Generate order ID
-// function generateOrderId() {
-//   return `UNO${Date.now()}${crypto.randomBytes(2).toString('hex')}`;
-// }
 
 // Create payment order endpoint
 app.post('/create-order', async (req, res) => {
@@ -81,23 +78,10 @@ app.post('/verify', async (req, res) => {
     const paymentStatus = paymentDetails.payment_status;
     const isSuccess = paymentStatus === "SUCCESS";
     
-    // Extract UTR from payment method object
-    // const utr = paymentDetails.payment_method?.utr || 
-    //             paymentDetails.payment_method?.upi?.utr || 
-    //             paymentDetails.payment_method?.netbanking?.utr ||
-    //             paymentDetails.payment_method?.card?.rrn;
-
-    // In production:
-    // 1. Update your database with payment status and UTR
-    // 2. Activate the user's plan
-    // 3. Send confirmation email
-    // console.log('utr: '+utr)
-    
     res.json({
       status: paymentStatus,
       order_id: orderId,
       is_success: isSuccess,
-      // utr: utr, // Include UTR in response
       payment_status: paymentStatus,
       payment_method: paymentDetails.payment_method,
       payment_time: paymentDetails.payment_time,
@@ -112,7 +96,17 @@ app.post('/verify', async (req, res) => {
   }
 });
 
+app.post('/trigger-deduction', async (req, res) => {
+  try {
+    manualTrigger();
+    res.json({ success: true, message: 'Deduction process triggered' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 9123;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('Daily deduction scheduler is active');
 });
