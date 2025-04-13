@@ -14,14 +14,14 @@ Cashfree.XClientSecret = process.env.CLIENT_SECRET;
 Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Changed to PRODUCTION
 
 // Generate order ID
-function generateOrderId() {
-  return `UNO${Date.now()}${crypto.randomBytes(2).toString('hex')}`;
-}
+// function generateOrderId() {
+//   return `UNO${Date.now()}${crypto.randomBytes(2).toString('hex')}`;
+// }
 
 // Create payment order endpoint
 app.post('/create-order', async (req, res) => {
   try {
-    const { plan, amount, planDetails } = req.body;
+    const { plan, amount, planDetails, mobileNumber, shopName, orderId } = req.body;
     
     if (!plan || !amount) {
       return res.status(400).json({ error: "Plan and amount are required" });
@@ -30,16 +30,14 @@ app.post('/create-order', async (req, res) => {
     const request = {
       order_amount: amount,
       order_currency: "INR",
-      order_id: generateOrderId(),
+      order_id: orderId,
       customer_details: {
-        customer_id: `customer_${crypto.randomBytes(4).toString('hex')}`,
-        customer_phone: "9999999999", // Get from auth in production
-        customer_name: "Unoshops Customer",
-        customer_email: "customer@unoshops.com"
+        customer_id: shopName,
+        customer_phone: mobileNumber
       },
       order_meta: {
-        return_url: req.body.return_url || "https://unoshops.com/payment-return",
-        plan_details: planDetails // Storing plan details in metadata
+        return_url: req.body.return_url || `https://unoshops.com/?rechargeModalVisible=true&orderId=${orderId}`,
+        plan_details: planDetails
       }
     };
 
