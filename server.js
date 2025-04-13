@@ -23,7 +23,7 @@ app.post('/create-order', async (req, res) => {
   try {
     const { plan, amount, planDetails, mobileNumber, shopName, orderId } = req.body;
     
-    if (!plan || !amount) {
+    if (!plan || !amount || !planDetails || !mobileNumber || !shopName || !orderId) {
       return res.status(400).json({ error: "Plan and amount are required" });
     }
 
