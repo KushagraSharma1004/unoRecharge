@@ -82,22 +82,22 @@ app.post('/verify', async (req, res) => {
     const isSuccess = paymentStatus === "SUCCESS";
     
     // Extract UTR from payment method object
-    const utr = paymentDetails.payment_method?.utr || 
-                paymentDetails.payment_method?.upi?.utr || 
-                paymentDetails.payment_method?.netbanking?.utr ||
-                paymentDetails.payment_method?.card?.rrn;
+    // const utr = paymentDetails.payment_method?.utr || 
+    //             paymentDetails.payment_method?.upi?.utr || 
+    //             paymentDetails.payment_method?.netbanking?.utr ||
+    //             paymentDetails.payment_method?.card?.rrn;
 
     // In production:
     // 1. Update your database with payment status and UTR
     // 2. Activate the user's plan
     // 3. Send confirmation email
-    console.log('utr: '+utr)
+    // console.log('utr: '+utr)
     
     res.json({
       status: paymentStatus,
       order_id: orderId,
       is_success: isSuccess,
-      utr: utr, // Include UTR in response
+      // utr: utr, // Include UTR in response
       payment_status: paymentStatus,
       payment_method: paymentDetails.payment_method,
       payment_time: paymentDetails.payment_time,
