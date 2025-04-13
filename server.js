@@ -73,16 +73,34 @@ app.post('/verify', async (req, res) => {
 
     const response = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
     
+    if (!response.data || response.data.length === 0) {
+      return res.status(404).json({ error: "No payment details found for this order" });
+    }
+
+    const paymentDetails = response.data[0];
+    const paymentStatus = paymentDetails.payment_status;
+    const isSuccess = paymentStatus === "SUCCESS";
+    
+    // Extract UTR from payment method object
+    const utr = paymentDetails.payment_method?.utr || 
+                paymentDetails.payment_method?.upi?.utr || 
+                paymentDetails.payment_method?.netbanking?.utr ||
+                paymentDetails.payment_method?.card?.rrn;
+
     // In production:
-    // 1. Update your database with payment status
+    // 1. Update your database with payment status and UTR
     // 2. Activate the user's plan
     // 3. Send confirmation email
     
     res.json({
-      status: "SUCCESS",
+      status: paymentStatus,
       order_id: orderId,
-      payment_status: response.data[0]?.payment_status,
-      payment_details: response.data
+      is_success: isSuccess,
+      utr: utr, // Include UTR in response
+      payment_status: paymentStatus,
+      payment_method: paymentDetails.payment_method,
+      payment_time: paymentDetails.payment_time,
+      payment_details: paymentDetails
     });
 
   } catch (error) {
