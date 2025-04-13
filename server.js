@@ -91,6 +91,7 @@ app.post('/verify', async (req, res) => {
     // 1. Update your database with payment status and UTR
     // 2. Activate the user's plan
     // 3. Send confirmation email
+    console.log('utr: '+utr)
     
     res.json({
       status: paymentStatus,
