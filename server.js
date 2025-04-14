@@ -37,7 +37,7 @@ const performDailyDeduction = async () => {
     
     const vendorsCol = collection(db, 'users');
     const vendorsSnapshot = await getDocs(vendorsCol);
-    const deductionAmount = 4;
+    const deductionAmount = 12;
     
     const batch = writeBatch(db);
     let processedCount = 0;
