@@ -124,6 +124,7 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
       const orderSnap = await transaction.get(orderRef);
 
       if (!orderSnap.exists()) {
+        console.log(`Order not found in Firestore for orderId: ${orderId}`)
         throw new Error(`Order not found in Firestore for orderId: ${orderId}`);
       }
 
@@ -140,6 +141,7 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
         rechargeId: orderId,
         // Add any other relevant details like UTR if available from Cashfree response
       });
+      console.log("rechargeDocRef: "+rechargeDocRef)
 
       // 3. Update the user's main balance
       const userRef = doc(db, `users/${mobileNumber}`);
