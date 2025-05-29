@@ -132,20 +132,13 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
 
       // 2. Add recharge record to `recharges` subcollection
       const rechargeDocRef = doc(db, `users/${mobileNumber}/recharges/${orderId}`);
-      transaction.set(rechargeDocRef, {
+      transaction.set(rechargeDocRef, { // Corrected: Use transaction.set
         timestamp: serverTimestamp(), // Use serverTimestamp for consistency
         plan: plan,
         amount: rechargeAmount,
         rechargeId: orderId,
         // Add any other relevant details like UTR if available from Cashfree response
       });
-      
-      setDoc(rechargeDocRef, {
-        timestamp: serverTimestamp(), // Use serverTimestamp for consistency
-        plan: plan,
-        amount: rechargeAmount,
-        rechargeId: orderId,
-      })
       console.log("Attempted to set recharge record at path: "+rechargeDocRef.path); // Added proper path logging
 
       // 3. Update the user's main balance
@@ -267,10 +260,10 @@ app.post('/verify', async (req, res) => {
       await setDoc(orderRef, { status: cashfreePaymentStatus, timestamp: serverTimestamp() }, { merge: true });
 
       if (cashfreePaymentStatus === 'FAILED') {
-         // Optionally delete failed orders after some time or immediately
-         // For now, let's keep it for debugging, but in production, you might delete it.
-         // await deleteDoc(orderRef);
-         console.log(`Order ${orderId} marked as FAILED in Firestore.`);
+          // Optionally delete failed orders after some time or immediately
+          // For now, let's keep it for debugging, but in production, you might delete it.
+          // await deleteDoc(orderRef);
+          console.log(`Order ${orderId} marked as FAILED in Firestore.`);
       }
 
       return res.status(200).json({
