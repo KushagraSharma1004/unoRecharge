@@ -97,8 +97,6 @@ const performDeduction = async () => {
 };
 
 // --- CRON SCHEDULER ---
-// This schedule runs the task every minute for testing.
-// For a daily deduction at midnight, change it back to '0 0 * * *'.
 cron.schedule('0 0 * * *', performDeduction, {
   scheduled: true,
   timezone: "Asia/Kolkata"
@@ -141,7 +139,14 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
         rechargeId: orderId,
         // Add any other relevant details like UTR if available from Cashfree response
       });
-      console.log("rechargeDocRef: "+rechargeDocRef)
+      
+      setDoc(rechargeDocRef, {
+        timestamp: serverTimestamp(), // Use serverTimestamp for consistency
+        plan: plan,
+        amount: rechargeAmount,
+        rechargeId: orderId,
+      })
+      console.log("Attempted to set recharge record at path: "+rechargeDocRef.path); // Added proper path logging
 
       // 3. Update the user's main balance
       const userRef = doc(db, `users/${mobileNumber}`);
