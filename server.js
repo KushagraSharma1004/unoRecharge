@@ -43,6 +43,8 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
+const CASHFREE_WEBHOOK_SECRET = process.env.CASHFREE_WEBHOOK_SECRET;
+
 const performDeduction = async () => {
   try {
     console.log('Starting balance deduction process...', new Date().toISOString());
@@ -205,15 +207,16 @@ app.post('/create-order', async (req, res) => {
   }
 });
 
-// NEW WEBHOOK ENDPOINT
+
+// ... (rest of your code remains the same until the webhook endpoint) ...
+
 app.post('/webhook', async (req, res) => {
   console.log('--- Cashfree Webhook received ---', new Date().toISOString());
 
-  // 1. Get headers for signature verification
   const xWebhookTimestamp = req.headers['x-webhook-timestamp'];
   const xWebhookSignature = req.headers['x-webhook-signature'];
-  const xWebhookVersion = req.headers['x-webhook-version']; // '2023-08-01' or '2025-01-01' etc.
-  const rawBody = req.rawBody; // The raw body string captured by middleware
+  const xWebhookVersion = req.headers['x-webhook-version'];
+  const rawBody = req.rawBody;
 
   console.log('Webhook Headers:', { xWebhookTimestamp, xWebhookSignature, xWebhookVersion });
   console.log('Webhook Raw Body:', rawBody);
@@ -224,12 +227,12 @@ app.post('/webhook', async (req, res) => {
   }
 
   try {
-    // 2. Verify the webhook signature
-    // Cashfree's SDK has a built-in helper for this
+    // Pass the dedicated webhook secret here if it's different from CLIENT_SECRET
     const isSignatureValid = Cashfree.PGVerifyWebhookSignature(
       xWebhookSignature,
       xWebhookTimestamp,
-      rawBody // Pass the raw body for verification
+      rawBody,
+      CASHFREE_WEBHOOK_SECRET // <--- ADD THIS LINE IF IT'S A DEDICATED WEBHOOK SECRET
     );
 
     if (!isSignatureValid) {
@@ -280,8 +283,6 @@ app.post('/webhook', async (req, res) => {
 
   } catch (error) {
     console.error("Webhook processing error:", error);
-    // Important: Always return 200 OK to Cashfree webhooks, even on internal errors,
-    // unless you want them to retry. For unhandled errors, log and then return 200.
     res.status(200).send('Webhook received, but encountered an error during processing.');
   }
 });
