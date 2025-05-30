@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto'); // Already imported
+const crypto = require('crypto');
 const { Cashfree } = require('cashfree-pg');
 require('dotenv').config();
 const cron = require('node-cron');
@@ -43,7 +43,8 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
-const CASHFREE_WEBHOOK_SECRET = process.env.CASHFREE_WEBHOOK_SECRET;
+// Ensure the secret is loaded and trimmed here, as you added previously
+const CASHFREE_WEBHOOK_SECRET = process.env.CASHFREE_WEBHOOK_SECRET ? process.env.CASHFREE_WEBHOOK_SECRET.trim() : undefined;
 
 const performDeduction = async () => {
   try {
@@ -185,8 +186,6 @@ app.post('/create-order', async (req, res) => {
         customer_phone: mobileNumber
       },
       order_meta: {
-        // You can still provide a return_url for client-side redirection after payment
-        // but the actual update should happen via webhook.
         return_url: `https://unoshops.com`, // Or a specific success/failure page
         plan_details: planDetails
       }
@@ -208,39 +207,51 @@ app.post('/create-order', async (req, res) => {
 });
 
 
-// ... (rest of your code remains the same until the webhook endpoint) ...
-
 app.post('/webhook', async (req, res) => {
   console.log('--- Cashfree Webhook received ---', new Date().toISOString());
 
   const xWebhookTimestamp = req.headers['x-webhook-timestamp'];
   const xWebhookSignature = req.headers['x-webhook-signature'];
   const xWebhookVersion = req.headers['x-webhook-version'];
-  const rawBody = req.rawBody;
+  const rawBody = req.rawBody; // Already captured by middleware
 
   console.log('Webhook Headers:', { xWebhookTimestamp, xWebhookSignature, xWebhookVersion });
-  console.log('Webhook Raw Body:', rawBody);
+  console.log('Webhook Raw Body (length: ' + rawBody.length + '): ' + rawBody); // Log length for debug
 
   if (!xWebhookTimestamp || !xWebhookSignature || !rawBody) {
     console.error('Webhook: Missing required headers or raw body for signature verification.');
     return res.status(400).send('Bad Request: Missing required webhook data.');
   }
 
+  // Ensure the secret is loaded and trimmed
+  if (!CASHFREE_WEBHOOK_SECRET) {
+    console.error('Webhook: CASHFREE_WEBHOOK_SECRET is not set or empty.');
+    return res.status(500).send('Server Error: Webhook secret not configured.');
+  }
+  console.log(`DEBUG: CASHFREE_WEBHOOK_SECRET length: ${CASHFREE_WEBHOOK_SECRET.length}`);
+  console.log(`DEBUG: CASHFREE_WEBHOOK_SECRET value: "${CASHFREE_WEBHOOK_SECRET}"`); // Log secret for debug (BE CAREFUL IN PROD)
+
+
   try {
-    // Pass the dedicated webhook secret here if it's different from CLIENT_SECRET
-    const isSignatureValid = Cashfree.PGVerifyWebhookSignature(
-      xWebhookSignature,
-      xWebhookTimestamp,
-      rawBody,
-      CASHFREE_WEBHOOK_SECRET // <--- ADD THIS LINE IF IT'S A DEDICATED WEBHOOK SECRET
-    );
+    // --- MANUAL SIGNATURE VERIFICATION (as per Cashfree Support) ---
+    const dataToSign = xWebhookTimestamp + rawBody;
+    const hmac = crypto.createHmac('sha256', CASHFREE_WEBHOOK_SECRET); // Use your loaded secret
+    hmac.update(dataToSign);
+    const generatedSignature = hmac.digest('base64'); // Cashfree uses base64 encoding
+
+    console.log(`Data to Sign (first 100 chars): "${dataToSign.substring(0, 100)}..."`);
+    console.log(`Generated Signature (manual): "${generatedSignature}"`);
+    console.log(`Received Signature: "${xWebhookSignature}"`);
+
+    const isSignatureValid = (generatedSignature === xWebhookSignature);
+    // --- END MANUAL SIGNATURE VERIFICATION ---
 
     if (!isSignatureValid) {
-      console.error('Webhook: Invalid signature. Request might be fraudulent.');
+      console.error('Webhook: Invalid signature. Generated and received signatures did not match (manual check).');
       return res.status(401).send('Unauthorized: Invalid webhook signature.');
     }
 
-    console.log('Webhook signature successfully verified.');
+    console.log('Webhook signature successfully verified (manual check).');
 
     // 3. Process the webhook payload
     const webhookData = req.body; // req.body is now the parsed JSON from express.json()
@@ -251,14 +262,15 @@ app.post('/webhook', async (req, res) => {
     const paymentDetails = webhookData.data.payment;
 
     const orderId = orderDetails.order_id;
-    const mobileNumber = orderDetails.customer_details ? orderDetails.customer_details.customer_phone : null; // Get mobile from order_meta if stored there, or customer_details
+    // Get mobile number from customer_details as it is present in the payload
+    const mobileNumber = orderDetails.customer_details ? orderDetails.customer_details.customer_phone : null;
 
     if (!orderId || !mobileNumber) {
       console.error('Webhook: Could not extract orderId or mobileNumber from webhook payload.', webhookData);
       return res.status(400).send('Bad Request: Invalid webhook payload structure.');
     }
 
-    if (eventType === 'PAYMENT_SUCCESS') {
+    if (eventType === 'PAYMENT_SUCCESS_WEBHOOK') { // Ensure correct event type for real webhook
       console.log(`Webhook: Payment success for Order ID: ${orderId}, Mobile: ${mobileNumber}`);
       const result = await processSuccessfulRecharge(orderId, mobileNumber);
       if (result.success) {
@@ -269,7 +281,8 @@ app.post('/webhook', async (req, res) => {
         // You should have robust internal error logging and monitoring for these cases.
         return res.status(200).send('Webhook received, but internal processing failed.');
       }
-    } else if (eventType === 'PAYMENT_FAILED' || eventType === 'PAYMENT_USER_DROPPED') {
+    } else if (eventType === 'PAYMENT_FAILED_WEBHOOK' || eventType === 'PAYMENT_USER_DROPPED_WEBHOOK') {
+        // Updated event types to match actual webhook payload
       console.log(`Webhook: Payment ${eventType} for Order ID: ${orderId}, Mobile: ${mobileNumber}`);
       // Optionally update the status of the temporary order in Firestore to 'FAILED'
       const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
@@ -286,65 +299,6 @@ app.post('/webhook', async (req, res) => {
     res.status(200).send('Webhook received, but encountered an error during processing.');
   }
 });
-
-// Remove the old /verify endpoint if you are purely relying on webhooks.
-// If you still want to allow manual verification, keep it, but ensure your client uses it explicitly.
-// For now, I'll keep it commented out to emphasize the webhook approach.
-/*
-app.post('/verify', async (req, res) => {
-  console.log('--- /verify endpoint hit ---', new Date().toISOString());
-  console.log('Request body:', req.body);
-
-  try {
-    const { orderId, mobileNumber } = req.body;
-    if (!orderId || !mobileNumber) {
-      console.error('Error: Order ID or Mobile Number missing in /verify request.', req.body);
-      return res.status(400).json({ error: "Order ID and Mobile Number are required" });
-    }
-
-    const response = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
-    const cashfreePaymentStatus = response.data.order_status;
-
-    console.log(`Cashfree status for Order ID ${orderId}: ${cashfreePaymentStatus}`);
-
-    if (cashfreePaymentStatus === 'PAID') {
-      const result = await processSuccessfulRecharge(orderId, mobileNumber);
-      if (result.success) {
-        return res.status(200).json({
-          message: "Payment verified and balance updated.",
-          cashfreeStatus: cashfreePaymentStatus,
-          data: response.data
-        });
-      } else {
-        return res.status(500).json({
-          message: result.message,
-          cashfreeStatus: cashfreePaymentStatus,
-          data: response.data
-        });
-      }
-    } else {
-      const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-      await setDoc(orderRef, { status: cashfreePaymentStatus, timestamp: serverTimestamp() }, { merge: true });
-
-      if (cashfreePaymentStatus === 'FAILED') {
-        console.log(`Order ${orderId} marked as FAILED in Firestore.`);
-      }
-
-      return res.status(200).json({
-        message: "Payment not successful or pending.",
-        cashfreeStatus: cashfreePaymentStatus,
-        data: response.data
-      });
-    }
-  } catch (error) {
-    console.error("Verification error:", error);
-    res.status(500).json({
-      error: error.response?.data?.message || "Failed to verify payment",
-      details: error.message
-    });
-  }
-});
-*/
 
 // Manual trigger endpoint
 app.post('/trigger-deduction', async (req, res) => {
