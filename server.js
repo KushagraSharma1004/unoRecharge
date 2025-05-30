@@ -246,15 +246,13 @@ const checkPendingPayments = async () => {
 
     let ordersToProcess = [];
 
-    // Loop through each user to get their 'rechargesOrderIds' subcollection
     for (const userDoc of usersSnapshot.docs) {
         const userId = userDoc.id;
         const userOrdersRef = collection(db, `users/${userId}/rechargesOrderIds`);
-        // We defined this constant outside, but ensuring it's available.
         const fiveMinutesAgo = new Date(Date.now() - (5 * 60 * 1000));
         const q = query(userOrdersRef,
             where('status', '==', 'initiated'),
-            where('timestamp', '<', fiveMinutesAgo) // Only check orders initiated at least 5 minutes ago
+            where('timestamp', '<', fiveMinutesAgo)
         );
         const initiatedOrdersSnap = await getDocs(q);
 
@@ -263,8 +261,8 @@ const checkPendingPayments = async () => {
             ordersToProcess.push({
                 orderId: orderDoc.id,
                 mobileNumber: orderData.mobileNumber,
-                shopName: orderData.shopName, // Useful for logging
-                timestamp: orderData.timestamp // For checking max age
+                shopName: orderData.shopName,
+                timestamp: orderData.timestamp
             });
         });
     }
@@ -284,32 +282,31 @@ const checkPendingPayments = async () => {
         console.log(`Polling Cashfree for Order ID: ${orderId}, User: ${mobileNumber}`);
         const cfResponse = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
 
-        // --- MODIFIED LOG & DATA ACCESS LOGIC ---
-        // Always log the 'data' property of the response to see the actual payload
-        console.log(`Cashfree API response 'data' for Order ID ${orderId}:`, JSON.stringify(cfResponse.data, null, 2));
+        // --- REVISED LOGIC FOR DATA CHECK AND PROCESSING ---
 
-        // Check if the overall response or its 'data' property is missing
+        // 1. Basic check for top-level response and data property
         if (!cfResponse || !cfResponse.data) {
-            console.warn(`Polling: Received empty or invalid top-level response from Cashfree for order ${orderId}.`);
-            // Decide how to handle this: skip, mark as error, or retry later.
-            // For now, we'll skip to the next order in the loop.
-            continue;
+            console.warn(`Polling: Received empty or invalid top-level response from Cashfree for order ${orderId}. Skipping this order.`);
+            continue; // Skip to the next order in the loop
         }
+
+        // 2. Log the data property only after confirming it exists
+        console.log(`Cashfree API response 'data' for Order ID ${orderId}:`, JSON.stringify(cfResponse.data, null, 2));
 
         const paymentsArray = cfResponse.data.payments;
 
-        // Now, check if the payments array is missing or empty
+        // 3. Check if the payments array is missing or empty
         if (!paymentsArray || paymentsArray.length === 0) {
-            console.warn(`Polling: No valid payment details (or empty payments array) found in Cashfree response for order ${orderId}. Checking max age.`);
+            console.warn(`Polling: No payment details (or empty payments array) found in Cashfree response for order ${orderId}. Checking max age.`);
             const orderAgeMs = Date.now() - orderInfo.timestamp.toMillis();
             if (orderAgeMs > MAX_PENDING_AGE_MINUTES * 60 * 1000) {
-                // If it's too old and still no payment details, mark it as stuck
                 console.warn(`Polling: Order ${orderId} for user ${mobileNumber} is too old (${MAX_PENDING_AGE_MINUTES}+ min) and no payment details found. Marking as 'STUCK_NO_CF_DATA'.`);
                 await setDoc(temporaryOrderRef, { status: 'STUCK_NO_CF_DATA', processedAt: serverTimestamp() }, { merge: true });
             }
             continue; // Skip to the next order if no payments
         }
 
+        // If we reach here, it means paymentsArray exists and has at least one element.
         const payment = paymentsArray[0]; // Assuming one payment per order for now
         const paymentStatus = payment.payment_status;
 
@@ -321,26 +318,19 @@ const checkPendingPayments = async () => {
         } else if (paymentStatus === 'FAILED' || paymentStatus === 'CANCELLED') {
           console.log(`Polling: Payment ${orderId} confirmed as ${paymentStatus}. Marking in Firestore.`);
           await setDoc(temporaryOrderRef, { status: paymentStatus, processedAt: serverTimestamp() }, { merge: true });
-          // Optionally delete the doc now, or keep it for failed history.
-          // await deleteDoc(temporaryOrderRef);
         } else if (paymentStatus === 'PENDING') {
-          // Keep as 'initiated' or update to 'pending_cf' to reflect it's being polled
           console.log(`Polling: Payment ${orderId} is still PENDING. Will check again later.`);
           await setDoc(temporaryOrderRef, { status: 'PENDING', lastChecked: serverTimestamp() }, { merge: true });
-        }
-        else {
-          // Handle other statuses not explicitly listed, or unexpected statuses from Cashfree
+        } else {
           console.log(`Polling: Payment status for Order ID ${orderId} is: ${paymentStatus}. No specific action defined yet.`);
         }
       } catch (error) {
         console.error(`Polling Error for Order ID ${orderId}, User ${mobileNumber}:`, error.message);
-        // Mark as an error state to avoid re-polling endlessly on API errors for this specific order
         await setDoc(temporaryOrderRef, { status: 'POLLING_ERROR', lastError: error.message, processedAt: serverTimestamp() }, { merge: true });
       }
     }
     console.log(`--- Finished pending payment check ---`, new Date().toISOString());
   } catch (error) {
-    // This top-level catch handles errors from the initial Firestore queries or general issues with the polling loop
     console.error('❌ Polling for pending payments failed at top level:', error, new Date().toISOString());
   }
 };
