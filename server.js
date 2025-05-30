@@ -48,9 +48,12 @@ Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Or Cashfree.Environm
 
 // --- Streamlined Function to Process Successful Recharge ---
 // This function remains largely the same, called now by /verify-payment-status endpoint
+console.log('hiiii')
 const processSuccessfulRecharge = async (orderId, mobileNumber) => {
+  console.log('hii2')
   try {
     await runTransaction(db, async (transaction) => {
+      console.log('hii3')
       const temporaryOrderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
       const temporaryOrderSnap = await transaction.get(temporaryOrderRef);
 
