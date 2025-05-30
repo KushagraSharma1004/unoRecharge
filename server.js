@@ -311,6 +311,39 @@ app.post('/trigger-deduction', async (req, res) => {
   }
 });
 
+app.get('/test-cashfree-sample-signature', (req, res) => {
+  // --- Data from Cashfree's support email ---
+  const webhooksignatureFromSample = 'EhW2Z+rTcC337M2hJMR4GxmivdwZIwyadTScjy33HEc=';
+  const postDataFromSample = `{"data":{"order":{"order_id":"qwert59954432221","order_amount":1.00,"order_currency":"INR","order_tags":null},"payment":{"cf_payment_id":5114917039291,"payment_status":"SUCCESS","payment_amount":1.00,"payment_currency":"INR","payment_message":"Simulated response message","payment_time":"2025-03-28T18:59:39+05:30","bank_reference":"1234567890","auth_id":null,"payment_method":{"upi":{"channel":null,"upi_id":"testsuccess@gocash"}},"payment_group":"upi"},"customer_details":{"customer_name":null,"customer_id":"devstudio_user","customer_email":"test123@gmail.com","customer_phone":"8474090589"}},"event_time":"2025-03-28T19:00:02+05:30","type":"PAYMENT_SUCCESS_WEBHOOK"}`;
+  const timestampFromSample = '1743168602521';
+  const secretKeyForTesting = 'caj1ueti8zo6626xdbxi'; // Your current webhook secret
+
+  // --- Perform manual signature generation using their sample data ---
+  const signedPayloadSample = timestampFromSample + postDataFromSample;
+  const hmacSample = crypto.createHmac('sha256', secretKeyForTesting);
+  hmacSample.update(signedPayloadSample);
+  const generatedSignatureForSample = hmacSample.digest('base64');
+
+  const match = (webhooksignatureFromSample === generatedSignatureForSample);
+
+  console.log(`--- Test /test-cashfree-sample-signature ---`);
+  console.log(`Cashfree Sample Expected Signature: "${webhooksignatureFromSample}"`);
+  console.log(`Your Generated Signature (for sample): "${generatedSignatureForSample}"`);
+  console.log(`Match for Sample Data: ${match}`);
+  console.log(`Signed Payload Length (Sample): ${signedPayloadSample.length}`);
+  console.log(`Raw Body Length (Sample): ${postDataFromSample.length}`);
+  console.log(`Timestamp (Sample): ${timestampFromSample}`);
+  console.log(`Secret Key (Sample): "${secretKeyForTesting}"`);
+  console.log(`--- End Test ---`);
+
+  res.json({
+      "message": "Check server logs for comparison result.",
+      "Cashfree Sample Expected Signature": webhooksignatureFromSample,
+      "Your Generated Signature (for sample)": generatedSignatureForSample,
+      "Match": match
+  });
+});
+
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
