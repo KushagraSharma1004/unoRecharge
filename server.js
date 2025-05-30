@@ -4,6 +4,7 @@ const { Cashfree } = require('cashfree-pg');
 require('dotenv').config();
 const cron = require('node-cron');
 const { initializeApp } = require('firebase/app');
+
 const {
   getFirestore,
   collection,
@@ -15,8 +16,9 @@ const {
   setDoc,
   deleteDoc,
   runTransaction,
-  query, // Added for querying initiated orders
-  where // Added for querying initiated orders
+  query,
+  where,
+  FieldValue
 } = require('firebase/firestore');
 
 const app = express();
@@ -42,76 +44,68 @@ Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Or Cashfree.Environm
 
 // --- Streamlined Function to Process Successful Recharge ---
 const processSuccessfulRecharge = async (orderId, mobileNumber) => {
+  const temporaryOrderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
+  const userProfileRef = doc(db, 'users', mobileNumber);
+
   try {
     await runTransaction(db, async (transaction) => {
-      const temporaryOrderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-      const temporaryOrderSnap = await transaction.get(temporaryOrderRef);
+      // --- ALL READS MUST COME FIRST ---
 
-      if (!temporaryOrderSnap.exists()) {
-        console.warn(`Transaction Warning: Temporary order ${orderId} for user ${mobileNumber} not found during processing. It might be already processed or never created.`);
-        return;
+      // Read 1: Get the user's profile to update balance
+      const userProfileDoc = await transaction.get(userProfileRef);
+      if (!userProfileDoc.exists()) {
+        throw new Error(`User profile for ${mobileNumber} not found.`);
       }
+      const currentBalance = userProfileDoc.data().balance || 0;
 
-      const orderData = temporaryOrderSnap.data();
-      // Ensure the order hasn't been marked as 'SUCCESS' already by a previous attempt
-      if (orderData.status === 'SUCCESS') {
-          console.warn(`Transaction Warning: Order ${orderId} for user ${mobileNumber} already processed as SUCCESS.`);
-          return;
+      // Read 2 (Optional, if you need data from the temporary order for history)
+      const temporaryOrderDoc = await transaction.get(temporaryOrderRef);
+      if (!temporaryOrderDoc.exists()) {
+        console.warn(`Temporary order ${orderId} not found during successful processing.`);
+        // Decide what to do here: maybe throw or just proceed without its data
+        // For now, let's assume it should exist.
+        // If you don't need data from it for history, you can skip this read.
       }
+      const orderData = temporaryOrderDoc.data(); // Get data from the temp order
 
-      const rechargeAmount = Number(orderData.amount) || 0;
-      const plan = orderData.plan;
 
-      const rechargeHistoryRef = doc(db, `users/${mobileNumber}/recharges/${orderId}`);
-      const rechargeHistoryData = {
-        timestamp: serverTimestamp(),
-        plan: plan,
+      // --- ALL WRITES MUST COME AFTER ALL READS ---
+
+      // Write 1: Update user balance
+      const rechargeAmount = orderData.amount; // Assuming 'amount' is stored in the temp order
+      const newBalance = currentBalance + rechargeAmount;
+      transaction.update(userProfileRef, { balance: newBalance });
+      console.log(`Updated balance for user ${mobileNumber} to ${newBalance}.`);
+
+      // Write 2: Add to recharge history
+      const rechargeHistoryRef = collection(db, `users/${mobileNumber}/rechargeHistory`);
+      transaction.set(doc(rechargeHistoryRef), {
+        orderId: orderId,
         amount: rechargeAmount,
-        rechargeId: orderId,
         status: 'SUCCESS',
-        mobileNumber: orderData.mobileNumber,
-        shopName: orderData.shopName
-      };
-      transaction.set(rechargeHistoryRef, rechargeHistoryData);
+        timestamp: FieldValue.serverTimestamp(), // Use server timestamp for consistency
+        // Add other relevant details from orderData if needed, e.g., mobileNumber, shopName etc.
+        paymentDetails: orderData.paymentDetails || {}, // Example
+        originalTimestamp: orderData.timestamp // Keep original order timestamp
+      });
       console.log(`Recharge history added for order ID ${orderId}, user ${mobileNumber}.`);
 
-      const userRef = doc(db, `users/${mobileNumber}`);
-      const userSnap = await transaction.get(userRef);
-      const userData = userSnap.data();
-      const currentBalance = Number(userData.balance) || 0;
 
-      let newBalance = currentBalance + rechargeAmount;
-      if (plan === 'yearly') {
-        newBalance += 720;
-        console.log(`Yearly bonus applied for user ${mobileNumber}.`);
-      }
-
-      transaction.update(userRef, {
-        balance: newBalance,
-        lastRecharge: serverTimestamp()
-      });
-      console.log(`User ${mobileNumber} balance updated to ${newBalance}.`);
-
-      // Update the temporary order status to 'SUCCESS' before deleting (for robust logging)
-      transaction.update(temporaryOrderRef, {
-          status: 'SUCCESS',
-          processedAt: serverTimestamp(),
-          // Add a field to indicate it was processed by polling
-          processedBy: 'polling'
-      });
-      console.log(`Temporary order ${orderId} status updated to SUCCESS for user ${mobileNumber}.`);
-
-      // Remove the order from rechargeOrderIds collection (after successful processing)
+      // Write 3: Delete the temporary order
       transaction.delete(temporaryOrderRef);
-      console.log(`Temporary order ${orderId} removed from rechargesOrderIds for user ${mobileNumber}.`);
+      console.log(`Temporary order ${orderId} deleted.`);
 
-      console.log(`✅ Fully processed successful recharge for user ${mobileNumber}, Order ID: ${orderId}.`);
+      console.log(`Order ${orderId} for user ${mobileNumber} successfully processed.`);
     });
-    return { success: true, message: 'Recharge successfully processed.' };
   } catch (error) {
     console.error(`❌ Error during transaction for order ID ${orderId}, user ${mobileNumber}:`, error);
-    if (error.code) console.error(`Firestore error code: ${error.code}`);
-    return { success: false, message: `Failed to process recharge: ${error.message}` };
+    console.error(`Firestore error code: ${error.code}`);
+
+    // If the transaction fails, you might want to update the status in Firestore
+    // outside the transaction (or in a separate, simpler transaction)
+    // to 'PROCESSING_FAILED' or similar, so it doesn't get perpetually re-polled
+    // if the issue is persistent.
+    await setDoc(temporaryOrderRef, { status: 'TRANSACTION_FAILED', lastError: error.message, processedAt: FieldValue.serverTimestamp() }, { merge: true });
   }
 };
 
