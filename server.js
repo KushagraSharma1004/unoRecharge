@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto'); // Still needed for potential future use or manual testing, but not for this specific flow.
+const crypto = require('crypto');
 const { Cashfree } = require('cashfree-pg'); // Correct import for Cashfree SDK
 require('dotenv').config();
 const cron = require('node-cron');
@@ -23,9 +23,9 @@ const {
 const app = express();
 app.use(cors());
 
-// IMPORTANT: We no longer need this for webhook signature verification if webhooks are truly unused.
-// However, keeping it doesn't hurt and might be useful if you re-introduce webhooks later.
-// For now, it's inert in this context.
+// IMPORTANT: Keep this for raw body parsing. Even if webhooks are removed,
+// if you were previously using it for signature verification on a webhook
+// and then switched back, or if any other part of your app needs raw body.
 app.use(express.json({
   limit: '5mb',
   verify: (req, res, buf) => {
@@ -45,21 +45,15 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
-// CASHFREE_WEBHOOK_SECRET is not directly used if the webhook endpoint is removed.
-// It's benign to keep it loaded if it's in your .env file, but it's not active.
+// CASHFREE_WEBHOOK_SECRET is not used directly in this code anymore,
+// as the webhook endpoint has been removed. It's safe to keep in .env.
 const CASHFREE_WEBHOOK_SECRET = process.env.CASHFREE_WEBHOOK_SECRET ? process.env.CASHFREE_WEBHOOK_SECRET.trim() : undefined;
 
-// --- Initialize Cashfree SDK correctly ---
-// You should create an instance of Cashfree with your credentials.
-// The SDK methods like PGCreateOrder and PGVerifyPayment are on this instance.
-const cashfreeInstance = new Cashfree(
-    process.env.CLIENT_ID,
-    process.env.CLIENT_SECRET,
-    Cashfree.Environment.PRODUCTION // Or Cashfree.Environment.SANDBOX
-);
-
-// Ensure the environment is correctly set up for the instance
-cashfreeInstance.XEnvironment = Cashfree.Environment.PRODUCTION; // This should be part of the constructor or set once.
+// --- Initialize Cashfree SDK - Set static properties directly ---
+// This is the correct way based on your logs indicating methods are not on an instance.
+Cashfree.XClientId = process.env.CLIENT_ID;
+Cashfree.XClientSecret = process.env.CLIENT_SECRET;
+Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Ensure this is correct (PRODUCTION or SANDBOX)
 
 const performDeduction = async () => {
   try {
@@ -211,8 +205,8 @@ app.post('/create-order', async (req, res) => {
       }
     };
 
-    // Correct way to call PGCreateOrder on the cashfreeInstance
-    const response = await cashfreeInstance.PGCreateOrder("2023-08-01", request);
+    // Correct way to call PGCreateOrder as a static method
+    const response = await Cashfree.PGCreateOrder("2023-08-01", request);
     res.json(response.data);
   } catch (error) {
     console.error("Order creation error:", error);
@@ -227,7 +221,6 @@ app.post('/create-order', async (req, res) => {
   }
 });
 
-// --- CRON JOB FOR SERVER-SIDE POLLING ---
 const pollCashfreePayments = async () => {
   console.log('--- Starting Cashfree Payment Polling ---', new Date().toISOString());
   try {
@@ -244,16 +237,16 @@ const pollCashfreePayments = async () => {
     for (const userDoc of usersSnapshot.docs) {
       const mobileNumber = userDoc.id;
 
-      // Query for orders that are 'initiated' or 'PENDING'
-      // Only check orders that are relatively recent (e.g., last 24 hours) to limit API calls
+      // Query for orders that are 'initiated' or 'PENDING' within the last 24 hours.
+      // IMPORTANT: This query requires a Firestore composite index.
+      // See the "Action Required: Create Firestore Index" section below for details.
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const pendingOrdersQuery = query(
           collection(db, `users/${mobileNumber}/rechargesOrderIds`),
-          where('timestamp', '>', twentyFourHoursAgo), // Ensure 'timestamp' is indexed in Firestore
+          where('timestamp', '>', twentyFourHoursAgo),
           where('status', 'in', ['initiated', 'PENDING'])
       );
       const pendingOrdersSnapshot = await getDocs(pendingOrdersQuery);
-
 
       if (pendingOrdersSnapshot.empty) {
         continue;
@@ -261,14 +254,14 @@ const pollCashfreePayments = async () => {
 
       for (const orderDoc of pendingOrdersSnapshot.docs) {
         const orderId = orderDoc.id;
-        const currentStatusInDB = orderDoc.data().status; // Should be 'initiated' or 'PENDING' here
+        const currentStatusInDB = orderDoc.data().status;
 
         console.log(`Polling Cashfree for Order ID: ${orderId} (User: ${mobileNumber}) with current DB status: ${currentStatusInDB}`);
         ordersChecked++;
 
         try {
-          // Correct way to call PGVerifyPayment on the cashfreeInstance
-          const cfResponse = await cashfreeInstance.PGVerifyPayment("2023-08-01", { order_id: orderId });
+          // Correct way to call PGVerifyPayment as a static method
+          const cfResponse = await Cashfree.PGVerifyPayment("2023-08-01", { order_id: orderId });
           const paymentStatus = cfResponse.data.payment_status;
 
           console.log(`Cashfree status for Order ID ${orderId}: ${paymentStatus}`);
@@ -292,14 +285,15 @@ const pollCashfreePayments = async () => {
               console.log(`Order ${orderId} is still PENDING with Cashfree. Updating DB status.`);
               const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
               await setDoc(orderRef, { status: 'PENDING', timestamp: serverTimestamp() }, { merge: true });
-          } else {
+          } else { // Handle other statuses like CANCELLED, EXPIRED, etc.
             console.log(`Unhandled Cashfree status for Order ID ${orderId}: ${paymentStatus}. Marking in DB.`);
             const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
             await setDoc(orderRef, { status: `CF_${paymentStatus}`, timestamp: serverTimestamp() }, { merge: true });
           }
         } catch (pollError) {
           console.error(`❌ Error during Cashfree polling for order ID ${orderId}:`, pollError.response?.data || pollError.message);
-          // Potentially mark the order in DB with an error status for manual review if repeated
+          // For network errors or unexpected Cashfree API responses, you might want to log more details
+          // and consider a mechanism for retries or manual intervention.
         }
       }
     }
@@ -317,8 +311,8 @@ cron.schedule('*/5 * * * *', pollCashfreePayments, {
 
 console.log('Cashfree Payment Polling scheduler is active. It will run every 5 minutes.');
 
-// --- REMOVED WEBHOOK ENDPOINT ENTIRELY ---
-// I've removed the app.post('/webhook', ...) block as per your clear instruction.
+// --- WEBHOOK ENDPOINT HAS BEEN REMOVED ENTIRELY ---
+// As per your request, there is no webhook listener in this code.
 
 app.post('/trigger-deduction', async (req, res) => {
   console.log('Manually triggering deduction...');
