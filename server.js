@@ -236,7 +236,7 @@ const MAX_PENDING_AGE_MINUTES = 30; // How long to keep polling an order before 
 const checkPendingPayments = async () => {
   console.log(`--- Starting pending payment check (polling) ---`, new Date().toISOString());
   try {
-    const initiatedOrdersCollectionGroup = collection(db, 'users'); // Will query all users collections to find subcollections
+    const initiatedOrdersCollectionGroup = collection(db, 'users');
     const usersSnapshot = await getDocs(initiatedOrdersCollectionGroup);
 
     if (usersSnapshot.empty) {
@@ -246,15 +246,13 @@ const checkPendingPayments = async () => {
 
     let ordersToProcess = [];
 
-    // Loop through each user to get their 'rechargesOrderIds' subcollection
     for (const userDoc of usersSnapshot.docs) {
         const userId = userDoc.id;
         const userOrdersRef = collection(db, `users/${userId}/rechargesOrderIds`);
-        // Query for orders that are 'initiated' and old enough to have potentially completed
         const fiveMinutesAgo = new Date(Date.now() - (5 * 60 * 1000));
         const q = query(userOrdersRef,
             where('status', '==', 'initiated'),
-            where('timestamp', '<', fiveMinutesAgo) // Only check orders initiated at least 5 minutes ago
+            where('timestamp', '<', fiveMinutesAgo)
         );
         const initiatedOrdersSnap = await getDocs(q);
 
@@ -263,8 +261,8 @@ const checkPendingPayments = async () => {
             ordersToProcess.push({
                 orderId: orderDoc.id,
                 mobileNumber: orderData.mobileNumber,
-                shopName: orderData.shopName, // Useful for logging
-                timestamp: orderData.timestamp // For checking max age
+                shopName: orderData.shopName,
+                timestamp: orderData.timestamp
             });
         });
     }
@@ -284,16 +282,21 @@ const checkPendingPayments = async () => {
         console.log(`Polling Cashfree for Order ID: ${orderId}, User: ${mobileNumber}`);
         const cfResponse = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
 
-        if (!cfResponse.data || cfResponse.data.payments.length === 0) {
-            console.warn(`Polling: No payment details found for order ${orderId} from Cashfree. Checking max age.`);
-            const orderAgeMs = Date.now() - orderInfo.timestamp.toMillis(); // Convert Firestore timestamp to JS Date
+        // --- ADD THESE LOGS ---
+        console.log("Full Cashfree API response for order fetch:", JSON.stringify(cfResponse, null, 2));
+        // --- END ADDED LOGS ---
+
+        if (!cfResponse || !cfResponse.data || !cfResponse.data.payments || cfResponse.data.payments.length === 0) {
+            console.warn(`Polling: No valid payment details (or empty payments array) found for order ${orderId} from Cashfree. Checking max age.`);
+            const orderAgeMs = Date.now() - orderInfo.timestamp.toMillis();
             if (orderAgeMs > MAX_PENDING_AGE_MINUTES * 60 * 1000) {
                 console.warn(`Polling: Order ${orderId} for user ${mobileNumber} is too old (${MAX_PENDING_AGE_MINUTES}+ min) and no payment details found. Marking as 'STUCK_NO_CF_DATA'.`);
                 await setDoc(temporaryOrderRef, { status: 'STUCK_NO_CF_DATA', processedAt: serverTimestamp() }, { merge: true });
             }
-            continue; // Move to next order
+            continue;
         }
 
+        // The rest of your logic remains the same
         const payment = cfResponse.data.payments[0];
         const paymentStatus = payment.payment_status;
 
@@ -304,23 +307,18 @@ const checkPendingPayments = async () => {
         } else if (paymentStatus === 'FAILED' || paymentStatus === 'CANCELLED') {
           console.log(`Polling: Payment ${orderId} confirmed as ${paymentStatus}. Marking in Firestore.`);
           await setDoc(temporaryOrderRef, { status: paymentStatus, processedAt: serverTimestamp() }, { merge: true });
-          // Optionally delete the doc now, or keep it for failed history.
-          // await deleteDoc(temporaryOrderRef);
         } else if (paymentStatus === 'PENDING') {
-          // Keep as 'initiated' or update to 'pending_cf' to reflect it's being polled
           console.log(`Polling: Payment ${orderId} is still PENDING. Will check again later.`);
           await setDoc(temporaryOrderRef, { status: 'PENDING', lastChecked: serverTimestamp() }, { merge: true });
         }
-        // For other statuses, no specific action, it will remain as 'initiated' and be re-polled
       } catch (error) {
         console.error(`Polling Error for Order ID ${orderId}, User ${mobileNumber}:`, error.message);
-        // Mark as an error state to avoid re-polling endlessly on API errors
         await setDoc(temporaryOrderRef, { status: 'POLLING_ERROR', lastError: error.message, processedAt: serverTimestamp() }, { merge: true });
       }
     }
     console.log(`--- Finished pending payment check ---`, new Date().toISOString());
   } catch (error) {
-    console.error('❌ Polling for pending payments failed:', error, new Date().toISOString());
+    console.error('❌ Polling for pending payments failed at top level:', error, new Date().toISOString()); // Added this specific message
   }
 };
 
