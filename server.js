@@ -115,6 +115,13 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
 
       if (!orderSnap.exists()) {
         console.log(`Order not found in Firestore for orderId: ${orderId} during transaction.`);
+        // If order doesn't exist in pending, check if it's already processed
+        const existingRechargeRef = doc(db, `users/${mobileNumber}/recharges/${orderId}`);
+        const existingRechargeSnap = await transaction.get(existingRechargeRef);
+        if (existingRechargeSnap.exists()) {
+            console.log(`Order ${orderId} already processed for user ${mobileNumber}. Skipping.`);
+            return { success: true, message: 'Order already processed.' }; // Indicate already processed
+        }
         throw new Error(`Order not found in Firestore for orderId: ${orderId}`);
       }
 
@@ -128,6 +135,7 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
         plan: plan,
         amount: rechargeAmount,
         rechargeId: orderId,
+        status: 'SUCCESS' // Explicitly set status to SUCCESS
       });
       console.log("Attempted to set recharge record at path: "+rechargeDocRef.path);
 
@@ -146,7 +154,7 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
         lastRecharge: serverTimestamp()
       });
 
-      transaction.delete(orderRef);
+      transaction.delete(orderRef); // Remove from pending orders
 
       console.log(`✅ Recharge processed successfully for user ${mobileNumber}, Order ID: ${orderId}. New balance: ${newBalance}`);
     });
@@ -171,7 +179,7 @@ app.post('/create-order', async (req, res) => {
       plan: plan,
       amount: amount,
       timestamp: serverTimestamp(),
-      status: 'initiated',
+      status: 'initiated', // Initial status in temporary collection
       mobileNumber: mobileNumber,
       shopName: shopName
     });
@@ -186,7 +194,10 @@ app.post('/create-order', async (req, res) => {
         customer_phone: mobileNumber
       },
       order_meta: {
-        return_url: `https://unoshops.com`, // Or a specific success/failure page
+        // IMPORTANT: Update this return_url to point to your frontend page
+        // that will call the new /verify-payment-status endpoint.
+        // You might need to append order_id to this URL.
+        return_url: `https://your-frontend-domain.com/payment-status?order_id=${orderId}`, 
         plan_details: planDetails
       }
     };
@@ -207,6 +218,57 @@ app.post('/create-order', async (req, res) => {
 });
 
 
+// NEW ENDPOINT: Verify payment status directly with Cashfree
+app.post('/verify-payment-status', async (req, res) => {
+  console.log('--- Verify Payment Status Request received ---', new Date().toISOString());
+  const { orderId, mobileNumber } = req.body; // Expect orderId and mobileNumber from frontend
+
+  if (!orderId || !mobileNumber) {
+    console.error('Verify Payment Status: Missing orderId or mobileNumber in request.');
+    return res.status(400).json({ success: false, message: 'Missing orderId or mobileNumber.' });
+  }
+
+  try {
+    // 1. Query Cashfree for the definitive payment status
+    const cfResponse = await Cashfree.PGVerifyPayment("2023-08-01", { order_id: orderId });
+    console.log(`Cashfree Verify Payment Response for Order ID ${orderId}:`, cfResponse.data);
+
+    const paymentStatus = cfResponse.data.payment_status; // e.g., "SUCCESS", "FAILED", "PENDING"
+    const cf_payment_id = cfResponse.data.cf_payment_id;
+
+    if (paymentStatus === 'SUCCESS') {
+      console.log(`Payment SUCCESS for Order ID ${orderId}. Proceeding to process recharge.`);
+      const result = await processSuccessfulRecharge(orderId, mobileNumber);
+      if (result.success) {
+        return res.status(200).json({ success: true, status: paymentStatus, message: 'Payment verified and recharge processed.' });
+      } else {
+        console.error(`Verify Payment Status: Failed to process successful recharge for Order ID ${orderId}: ${result.message}`);
+        // Return success:true here if the payment was successful with Cashfree,
+        // but your internal processing failed. This distinguishes from payment failure.
+        return res.status(200).json({ success: true, status: paymentStatus, message: 'Payment successful, but internal processing failed.', internalError: result.message });
+      }
+    } else if (paymentStatus === 'FAILED' || paymentStatus === 'USER_DROPPED') {
+      console.log(`Payment ${paymentStatus} for Order ID ${orderId}.`);
+      const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
+      // Update status in temporary collection and optionally delete it, or keep for record
+      await setDoc(orderRef, { status: paymentStatus, timestamp: serverTimestamp() }, { merge: true })
+        .catch(e => console.error(`Error updating status for ${paymentStatus} order ${orderId}:`, e));
+      return res.status(200).json({ success: false, status: paymentStatus, message: `Payment ${paymentStatus}.` });
+    } else { // PENDING, CANCELLED, etc.
+      console.log(`Payment status is ${paymentStatus} for Order ID ${orderId}.`);
+      return res.status(200).json({ success: false, status: paymentStatus, message: `Payment status is ${paymentStatus}.` });
+    }
+
+  } catch (error) {
+    console.error(`❌ Verify Payment Status Error for Order ID ${orderId}:`, error.response?.data || error.message);
+    // Be careful not to expose too much internal error info to the frontend
+    return res.status(500).json({ success: false, message: 'Failed to verify payment status with Cashfree.', error: error.response?.data?.message || error.message });
+  }
+});
+
+
+// WEBHOOK ENDPOINT (Keep this for now, even if you rely on pull-based for immediate updates)
+// It's good practice to have both if possible, as webhooks are more real-time.
 app.post('/webhook', async (req, res) => {
   console.log('--- Cashfree Webhook received ---', new Date().toISOString());
 
@@ -311,6 +373,7 @@ app.post('/trigger-deduction', async (req, res) => {
   }
 });
 
+// Test endpoint for Cashfree sample signature (keep this for now for debugging if needed)
 app.get('/test-cashfree-sample-signature', (req, res) => {
   // --- Data from Cashfree's support email ---
   const webhooksignatureFromSample = 'EhW2Z+rTcC337M2hJMR4GxmivdwZIwyadTScjy33HEc=';
@@ -343,7 +406,6 @@ app.get('/test-cashfree-sample-signature', (req, res) => {
       "Match": match
   });
 });
-
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
