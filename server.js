@@ -15,7 +15,7 @@ const {
   getDoc,
   setDoc,
   deleteDoc,
-  runTransaction // Retaining runTransaction for atomicity
+  runTransaction
 } = require('firebase/firestore');
 
 const app = express();
@@ -235,7 +235,7 @@ app.post('/create-order', async (req, res) => {
 });
 
 
-// --- Cashfree Webhook Endpoint (Streamlined) ---
+// --- Cashfree Webhook Endpoint (Added detailed debug logging) ---
 app.post('/cashfree-webhook', async (req, res) => {
   console.log('--- Cashfree Webhook received ---', new Date().toISOString());
 
@@ -250,30 +250,46 @@ app.post('/cashfree-webhook', async (req, res) => {
     return res.status(400).send("Missing required webhook headers or raw body.");
   }
 
-  // Debugging: Log received headers and raw body for verification
-  console.log("Webhook Headers:", webhookHeaders);
-  console.log("Webhook Raw Body (length: " + rawBody.length + "):", rawBody.substring(0, 500) + (rawBody.length > 500 ? '...' : '')); // Log truncated body
+  // Debugging: Log raw body for verification
+  console.log("Webhook Raw Body from req.rawBody (length: " + rawBody.length + "):");
+  console.log(rawBody); // Log the full raw body
+
+  // Also log the string that will be signed by the Cashfree SDK
+  const stringToSign = webhookTimestamp + rawBody;
+  console.log("String to be signed (timestamp + rawBody):");
+  console.log(stringToSign);
 
   // Verify webhook signature (CRITICAL SECURITY STEP)
   try {
     const verified = Cashfree.verifySignature(webhookSignature, rawBody, webhookTimestamp, CASHFREE_WEBHOOK_SECRET);
 
     if (!verified) {
-      console.log("Webhook Verification Failed: Invalid signature. This webhook might be fraudulent or incorrectly configured.");
-      // Return 401 Unauthorized if signature does not match
+      console.log("Webhook Verification FAILED: Invalid signature. This webhook might be fraudulent or incorrectly configured.");
+      console.log(`Expected Signature (from webhook): ${webhookSignature}`);
+      // Try to generate local signature for comparison if possible (requires the exact secret)
+      try {
+          const hmac = crypto.createHmac('sha256', CASHFREE_WEBHOOK_SECRET);
+          hmac.update(stringToSign);
+          const localSignature = hmac.digest('base64');
+          console.log(`Local Generated Signature: ${localSignature}`);
+      } catch (e) {
+          console.error("Error generating local signature for comparison:", e.message);
+      }
       return res.status(401).send("Invalid signature.");
     }
-    console.log("Webhook Verification Success: Signature matched.");
+    console.log("Webhook Verification SUCCESS: Signature matched.");
   } catch (error) {
-    console.error("Webhook Verification Error: Exception during signature verification:", error);
+    console.error("Webhook Verification ERROR: Exception during signature verification:", error);
     return res.status(500).send("Signature verification internal error.");
   }
 
   // Extract relevant data from the webhook event
-  const event = req.body;
+  const event = req.body; // req.body is the JSON parsed version
   const eventType = event.type;
   const orderId = event.data?.order?.order_id;
   const paymentStatus = event.data?.payment?.payment_status;
+  // paymentAmount and customerPhone from webhook body are not directly passed to processSuccessfulRecharge anymore,
+  // as it fetches from Firestore, but it's good to log them.
   const paymentAmount = event.data?.payment?.payment_amount;
   const customerPhone = event.data?.customer_details?.customer_phone;
 
@@ -292,7 +308,7 @@ app.post('/cashfree-webhook', async (req, res) => {
   } else if (eventType === 'PAYMENT_FAILED_WEBHOOK' && orderId && customerPhone) {
     console.log(`Webhook: Payment FAILED for Order ID ${orderId}. Marking as failed in DB.`);
     const orderRef = doc(db, `users/${customerPhone}/rechargesOrderIds/${orderId}`);
-    // We should just mark it as failed, not delete it, so you have a record of failed attempts.
+    // Mark it as failed, don't delete yet for record-keeping.
     await setDoc(orderRef, { status: 'FAILED', timestamp: serverTimestamp() }, { merge: true }).catch(e => console.error("Error setting failed status:", e));
     res.status(200).send("OK - Payment marked as failed.");
   } else {
