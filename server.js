@@ -282,9 +282,11 @@ const checkPendingPayments = async () => {
         console.log(`Polling Cashfree for Order ID: ${orderId}, User: ${mobileNumber}`);
         const cfResponse = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
 
-        // --- ADD THESE LOGS ---
-        console.log("Full Cashfree API response for order fetch:", JSON.stringify(cfResponse, null, 2));
-        // --- END ADDED LOGS ---
+        // --- MODIFIED LOG HERE ---
+        // Log only the 'data' property, which contains the actual API response payload.
+        // This 'data' object should be safe to stringify.
+        console.log("Cashfree API response 'data' for order fetch:", JSON.stringify(cfResponse.data, null, 2));
+        // --- END MODIFIED LOG ---
 
         if (!cfResponse || !cfResponse.data || !cfResponse.data.payments || cfResponse.data.payments.length === 0) {
             console.warn(`Polling: No valid payment details (or empty payments array) found for order ${orderId} from Cashfree. Checking max age.`);
@@ -296,7 +298,6 @@ const checkPendingPayments = async () => {
             continue;
         }
 
-        // The rest of your logic remains the same
         const payment = cfResponse.data.payments[0];
         const paymentStatus = payment.payment_status;
 
@@ -318,7 +319,7 @@ const checkPendingPayments = async () => {
     }
     console.log(`--- Finished pending payment check ---`, new Date().toISOString());
   } catch (error) {
-    console.error('❌ Polling for pending payments failed at top level:', error, new Date().toISOString()); // Added this specific message
+    console.error('❌ Polling for pending payments failed at top level:', error, new Date().toISOString());
   }
 };
 
