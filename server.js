@@ -282,28 +282,26 @@ const checkPendingPayments = async () => {
         console.log(`Polling Cashfree for Order ID: ${orderId}, User: ${mobileNumber}`);
         const cfResponse = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
 
-        // --- REVISED LOGIC FOR DATA CHECK AND PROCESSING ---
-
-        // 1. Basic check for top-level response and data property
-        if (!cfResponse || !cfResponse.data) {
-            console.warn(`Polling: Received empty or invalid top-level response from Cashfree for order ${orderId}. Skipping this order.`);
-            continue; // Skip to the next order in the loop
-        }
-
-        // 2. Log the data property only after confirming it exists
+        // ALWAYS log the raw data property of the response to see the actual payload
+        // This log line is kept here for debugging purposes, but it's important
+        // to understand its output might appear out of sequence due to logging buffers.
         console.log(`Cashfree API response 'data' for Order ID ${orderId}:`, JSON.stringify(cfResponse.data, null, 2));
 
-        const paymentsArray = cfResponse.data.payments;
+        // Use optional chaining (?.) and nullish coalescing (?? [])
+        // to safely get the payments array. If cfResponse or cfResponse.data
+        // is null/undefined, or cfResponse.data.payments is null/undefined,
+        // paymentsArray will safely default to an empty array [].
+        const paymentsArray = cfResponse?.data?.payments ?? [];
 
-        // 3. Check if the payments array is missing or empty
-        if (!paymentsArray || paymentsArray.length === 0) {
-            console.warn(`Polling: No payment details (or empty payments array) found in Cashfree response for order ${orderId}. Checking max age.`);
+        // Now, this check should be robust and accurate:
+        if (paymentsArray.length === 0) {
+            console.warn(`Polling: No valid payment details (empty array) found in Cashfree response for order ${orderId}. Checking max age.`);
             const orderAgeMs = Date.now() - orderInfo.timestamp.toMillis();
             if (orderAgeMs > MAX_PENDING_AGE_MINUTES * 60 * 1000) {
                 console.warn(`Polling: Order ${orderId} for user ${mobileNumber} is too old (${MAX_PENDING_AGE_MINUTES}+ min) and no payment details found. Marking as 'STUCK_NO_CF_DATA'.`);
                 await setDoc(temporaryOrderRef, { status: 'STUCK_NO_CF_DATA', processedAt: serverTimestamp() }, { merge: true });
             }
-            continue; // Skip to the next order if no payments
+            continue; // Skip to the next order if no payments were found
         }
 
         // If we reach here, it means paymentsArray exists and has at least one element.
@@ -322,15 +320,18 @@ const checkPendingPayments = async () => {
           console.log(`Polling: Payment ${orderId} is still PENDING. Will check again later.`);
           await setDoc(temporaryOrderRef, { status: 'PENDING', lastChecked: serverTimestamp() }, { merge: true });
         } else {
+          // Handle other statuses not explicitly listed, or unexpected statuses from Cashfree
           console.log(`Polling: Payment status for Order ID ${orderId} is: ${paymentStatus}. No specific action defined yet.`);
         }
       } catch (error) {
         console.error(`Polling Error for Order ID ${orderId}, User ${mobileNumber}:`, error.message);
+        // Mark as an error state to avoid re-polling endlessly on API errors for this specific order
         await setDoc(temporaryOrderRef, { status: 'POLLING_ERROR', lastError: error.message, processedAt: serverTimestamp() }, { merge: true });
       }
     }
     console.log(`--- Finished pending payment check ---`, new Date().toISOString());
   } catch (error) {
+    // This top-level catch handles errors from the initial Firestore queries or general issues with the polling loop
     console.error('❌ Polling for pending payments failed at top level:', error, new Date().toISOString());
   }
 };
