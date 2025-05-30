@@ -254,10 +254,9 @@ app.post('/cashfree-webhook', async (req, res) => {
   console.log("Webhook Raw Body from req.rawBody (length: " + rawBody.length + "):");
   console.log(rawBody); // Log the full raw body
 
-  // Also log the string that will be signed by the Cashfree SDK
-  const stringToSign = webhookTimestamp + rawBody;
-  console.log("String to be signed (timestamp + rawBody):");
-  console.log(stringToSign);
+  // Log the components used to generate the signature
+  console.log(`Webhook Timestamp: "${webhookTimestamp}"`);
+  console.log(`CASHFREE_WEBHOOK_SECRET (first 5 chars): "${CASHFREE_WEBHOOK_SECRET ? CASHFREE_WEBHOOK_SECRET.substring(0, 5) + '...' : 'NOT_SET'}"`);
 
   // Verify webhook signature (CRITICAL SECURITY STEP)
   try {
@@ -266,20 +265,31 @@ app.post('/cashfree-webhook', async (req, res) => {
     if (!verified) {
       console.log("Webhook Verification FAILED: Invalid signature. This webhook might be fraudulent or incorrectly configured.");
       console.log(`Expected Signature (from webhook): ${webhookSignature}`);
-      // Try to generate local signature for comparison if possible (requires the exact secret)
+      // This is the string Cashfree uses for HMAC: timestamp + rawBody
+      const stringForHmac = webhookTimestamp + rawBody;
+      console.log(`String used for local HMAC (timestamp + rawBody): "${stringForHmac}"`);
+
       try {
+          // Manually generate signature for comparison using Node's crypto
           const hmac = crypto.createHmac('sha256', CASHFREE_WEBHOOK_SECRET);
-          hmac.update(stringToSign);
-          const localSignature = hmac.digest('base64');
-          console.log(`Local Generated Signature: ${localSignature}`);
+          hmac.update(stringForHmac);
+          const localGeneratedSignature = hmac.digest('base64');
+          console.log(`Locally Generated Signature: ${localGeneratedSignature}`);
+          if (localGeneratedSignature === webhookSignature) {
+              console.warn("WARNING: Manual HMAC matched, but Cashfree.verifySignature returned false. This indicates a potential SDK issue or environment difference.");
+          }
       } catch (e) {
-          console.error("Error generating local signature for comparison:", e.message);
+          console.error("Error generating local signature for comparison (check CASHFREE_WEBHOOK_SECRET):", e.message);
       }
       return res.status(401).send("Invalid signature.");
     }
     console.log("Webhook Verification SUCCESS: Signature matched.");
   } catch (error) {
     console.error("Webhook Verification ERROR: Exception during signature verification:", error);
+    // If Cashfree.verifySignature throws an error, it's a serious issue.
+    if (error.name === 'Error' && error.message.includes('Invalid x-client-secret')) {
+        console.error("DEBUG: Likely issue with CASHFREE_WEBHOOK_SECRET being incorrect or malformed.");
+    }
     return res.status(500).send("Signature verification internal error.");
   }
 
@@ -319,31 +329,8 @@ app.post('/cashfree-webhook', async (req, res) => {
 });
 
 
-// Test endpoint for Cashfree sample signature (retained for your reference)
-app.get('/test-cashfree-sample-signature', (req, res) => {
-  const webhooksignatureFromSample = 'EhW2Z+rTcC337M2hJMR4GxmivdwZIwyadTScjy33HEc=';
-  const postDataFromSample = `{"data":{"order":{"order_id":"qwert59954432221","order_amount":1.00,"order_currency":"INR","order_tags":null},"payment":{"cf_payment_id":5114917039291,"payment_status":"SUCCESS","payment_amount":1.00,"payment_currency":"INR","payment_message":"Simulated response message","payment_time":"2025-03-28T18:59:39+05:30","bank_reference":"1234567890","auth_id":null,"payment_method":{"upi":{"channel":null,"upi_id":"testsuccess@gocash"}},"payment_group":"upi"},"customer_details":{"customer_name":null,"customer_id":"devstudio_user","customer_email":"test123@gmail.com","customer_phone":"8474090589"}},"event_time":"2025-03-28T19:00:02+05:30","type":"PAYMENT_SUCCESS_WEBHOOK"}`;
-  const timestampFromSample = '1743168602521';
-  const secretKeyForTesting = 'caj1ueti8zo6626xdbxi'; // Replace with a test secret if you have one, or just your actual one.
+// REMOVED: app.get('/test-cashfree-sample-signature', ...) // This endpoint is now removed as it was causing confusion.
 
-  const signedPayloadSample = timestampFromSample + postDataFromSample;
-  const hmacSample = crypto.createHmac('sha256', secretKeyForTesting);
-  hmacSample.update(signedPayloadSample);
-  const generatedSignatureForSample = hmacSample.digest('base64');
-
-  const match = (webhooksignatureFromSample === generatedSignatureForSample);
-
-  console.log(`--- Test /test-cashfree-sample-signature ---`);
-  console.log(`Cashfree Sample Expected Signature: "${webhooksignatureFromSample}"`);
-  console.log(`Your Generated Signature (for sample)": "${generatedSignatureForSample}"`);
-  console.log(`Match for Sample Data: ${match}`);
-  res.json({
-      "message": "Check server logs for comparison result.",
-      "Cashfree Sample Expected Signature": webhooksignatureFromSample,
-      "Your Generated Signature (for sample)": generatedSignatureForSample,
-      "Match": match
-  });
-});
 
 // Manual trigger for deduction (retained, untouched)
 app.post('/trigger-deduction', async (req, res) => {
