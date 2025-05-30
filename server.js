@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto');
-const { Cashfree } = require('cashfree-pg');
+const crypto = require('crypto'); // Still needed for potential future use or manual testing, but not for this specific flow.
+const { Cashfree } = require('cashfree-pg'); // Correct import for Cashfree SDK
 require('dotenv').config();
 const cron = require('node-cron');
 const { initializeApp } = require('firebase/app');
@@ -16,13 +16,16 @@ const {
   setDoc,
   deleteDoc,
   runTransaction,
-  query, // Import query
-  where // Import where
+  query,
+  where
 } = require('firebase/firestore');
 
 const app = express();
 app.use(cors());
 
+// IMPORTANT: We no longer need this for webhook signature verification if webhooks are truly unused.
+// However, keeping it doesn't hurt and might be useful if you re-introduce webhooks later.
+// For now, it's inert in this context.
 app.use(express.json({
   limit: '5mb',
   verify: (req, res, buf) => {
@@ -42,7 +45,21 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
+// CASHFREE_WEBHOOK_SECRET is not directly used if the webhook endpoint is removed.
+// It's benign to keep it loaded if it's in your .env file, but it's not active.
 const CASHFREE_WEBHOOK_SECRET = process.env.CASHFREE_WEBHOOK_SECRET ? process.env.CASHFREE_WEBHOOK_SECRET.trim() : undefined;
+
+// --- Initialize Cashfree SDK correctly ---
+// You should create an instance of Cashfree with your credentials.
+// The SDK methods like PGCreateOrder and PGVerifyPayment are on this instance.
+const cashfreeInstance = new Cashfree(
+    process.env.CLIENT_ID,
+    process.env.CLIENT_SECRET,
+    Cashfree.Environment.PRODUCTION // Or Cashfree.Environment.SANDBOX
+);
+
+// Ensure the environment is correctly set up for the instance
+cashfreeInstance.XEnvironment = Cashfree.Environment.PRODUCTION; // This should be part of the constructor or set once.
 
 const performDeduction = async () => {
   try {
@@ -101,10 +118,6 @@ cron.schedule('0 0 * * *', performDeduction, {
 
 console.log('Scheduler is active. Daily deduction will run at midnight (Asia/Kolkata time).');
 
-Cashfree.XClientId = process.env.CLIENT_ID;
-Cashfree.XClientSecret = process.env.CLIENT_SECRET;
-Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION;
-
 const processSuccessfulRecharge = async (orderId, mobileNumber) => {
   try {
     await runTransaction(db, async (transaction) => {
@@ -162,7 +175,7 @@ const processSuccessfulRecharge = async (orderId, mobileNumber) => {
   }
 };
 
-// Create payment order endpoint - Return URL is less critical for server-side polling
+// Create payment order endpoint
 app.post('/create-order', async (req, res) => {
   try {
     const { plan, amount, planDetails, mobileNumber, shopName, orderId } = req.body;
@@ -171,13 +184,12 @@ app.post('/create-order', async (req, res) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    // Store the order details with a 'pending' status
     const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
     await setDoc(orderRef, {
       plan: plan,
       amount: amount,
       timestamp: serverTimestamp(),
-      status: 'initiated', // Mark as initiated, needs verification
+      status: 'initiated', // Mark as initiated, needs verification via polling
       mobileNumber: mobileNumber,
       shopName: shopName
     });
@@ -192,14 +204,15 @@ app.post('/create-order', async (req, res) => {
         customer_phone: mobileNumber
       },
       order_meta: {
-        // You still need a return_url for Cashfree, but its target won't directly trigger your backend logic.
-        // It could just lead to a generic "payment in progress" or "check status later" page.
-        return_url: `https://your-frontend-domain.com/payment-status?order_id=${orderId}`,
+        // Return URL for Cashfree. It won't trigger backend logic directly now.
+        // It should lead to a page that informs the user the payment is being processed.
+        return_url: `https://your-frontend-domain.com/payment-processing?order_id=${orderId}`,
         plan_details: planDetails
       }
     };
 
-    const response = await Cashfree.PGCreateOrder("2023-08-01", request);
+    // Correct way to call PGCreateOrder on the cashfreeInstance
+    const response = await cashfreeInstance.PGCreateOrder("2023-08-01", request);
     res.json(response.data);
   } catch (error) {
     console.error("Order creation error:", error);
@@ -214,15 +227,10 @@ app.post('/create-order', async (req, res) => {
   }
 });
 
-// REMOVED: The /verify-payment-status endpoint as it relies on frontend to trigger.
-// This logic will now be handled by the cron job for server-side polling.
-// app.post('/verify-payment-status', async (req, res) => { ... });
-
-// --- NEW CRON JOB FOR SERVER-SIDE POLLING ---
+// --- CRON JOB FOR SERVER-SIDE POLLING ---
 const pollCashfreePayments = async () => {
   console.log('--- Starting Cashfree Payment Polling ---', new Date().toISOString());
   try {
-    // 1. Find all users
     const usersSnapshot = await getDocs(collection(db, 'users'));
     if (usersSnapshot.empty) {
       console.log('No users found for polling.');
@@ -234,13 +242,18 @@ const pollCashfreePayments = async () => {
     let failedRecharges = 0;
 
     for (const userDoc of usersSnapshot.docs) {
-      const mobileNumber = userDoc.id; // Assuming user ID is the mobile number
+      const mobileNumber = userDoc.id;
 
-      // 2. For each user, get pending orders from 'rechargesOrderIds'
-      // We look for orders that are 'initiated' or 'pending' for a certain period
-      // For simplicity, we'll just check all existing ones, but in a real app,
-      // you might add a `timestamp` and only check orders older than a few minutes/hours
-      const pendingOrdersSnapshot = await getDocs(collection(db, `users/${mobileNumber}/rechargesOrderIds`));
+      // Query for orders that are 'initiated' or 'PENDING'
+      // Only check orders that are relatively recent (e.g., last 24 hours) to limit API calls
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const pendingOrdersQuery = query(
+          collection(db, `users/${mobileNumber}/rechargesOrderIds`),
+          where('timestamp', '>', twentyFourHoursAgo), // Ensure 'timestamp' is indexed in Firestore
+          where('status', 'in', ['initiated', 'PENDING'])
+      );
+      const pendingOrdersSnapshot = await getDocs(pendingOrdersQuery);
+
 
       if (pendingOrdersSnapshot.empty) {
         continue;
@@ -248,19 +261,14 @@ const pollCashfreePayments = async () => {
 
       for (const orderDoc of pendingOrdersSnapshot.docs) {
         const orderId = orderDoc.id;
-        const currentStatusInDB = orderDoc.data().status;
+        const currentStatusInDB = orderDoc.data().status; // Should be 'initiated' or 'PENDING' here
 
-        // Skip orders that are already processed or failed in our system, unless re-checking
-        if (currentStatusInDB === 'SUCCESS' || currentStatusInDB === 'FAILED' || currentStatusInDB === 'USER_DROPPED') {
-            console.log(`Skipping polling for order ${orderId} (user ${mobileNumber}) as its status in DB is already ${currentStatusInDB}.`);
-            continue;
-        }
-
-        console.log(`Polling Cashfree for Order ID: ${orderId} (User: ${mobileNumber})`);
+        console.log(`Polling Cashfree for Order ID: ${orderId} (User: ${mobileNumber}) with current DB status: ${currentStatusInDB}`);
         ordersChecked++;
 
         try {
-          const cfResponse = await Cashfree.PGVerifyPayment("2023-08-01", { order_id: orderId });
+          // Correct way to call PGVerifyPayment on the cashfreeInstance
+          const cfResponse = await cashfreeInstance.PGVerifyPayment("2023-08-01", { order_id: orderId });
           const paymentStatus = cfResponse.data.payment_status;
 
           console.log(`Cashfree status for Order ID ${orderId}: ${paymentStatus}`);
@@ -272,8 +280,6 @@ const pollCashfreePayments = async () => {
               successfulRecharges++;
             } else {
               console.error(`Polling: Failed to process successful recharge for Order ID ${orderId}: ${result.message}`);
-              // Even if processing failed, Cashfree confirmed success, so mark it
-              // to prevent re-processing in a loop. A human needs to intervene.
               const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
               await setDoc(orderRef, { status: 'SUCCESS_INTERNAL_FAILURE', timestamp: serverTimestamp() }, { merge: true });
             }
@@ -281,25 +287,19 @@ const pollCashfreePayments = async () => {
             console.log(`Payment ${paymentStatus} detected for Order ID ${orderId}. Updating status in DB.`);
             failedRecharges++;
             const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-            // Update status in temporary collection and optionally delete it
             await setDoc(orderRef, { status: paymentStatus, timestamp: serverTimestamp() }, { merge: true });
-            // Optionally delete the orderRef here if you don't need failed records
-            // await deleteDoc(orderRef);
           } else if (paymentStatus === 'PENDING') {
-              console.log(`Order ${orderId} is still PENDING with Cashfree.`);
-              // Keep it in rechargesOrderIds with 'initiated' or 'pending' status
-              // No action needed other than logging.
+              console.log(`Order ${orderId} is still PENDING with Cashfree. Updating DB status.`);
               const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
               await setDoc(orderRef, { status: 'PENDING', timestamp: serverTimestamp() }, { merge: true });
           } else {
-            console.log(`Unhandled Cashfree status for Order ID ${orderId}: ${paymentStatus}`);
-            // You might want to update status to 'UNKNOWN' or similar for manual review
+            console.log(`Unhandled Cashfree status for Order ID ${orderId}: ${paymentStatus}. Marking in DB.`);
             const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
             await setDoc(orderRef, { status: `CF_${paymentStatus}`, timestamp: serverTimestamp() }, { merge: true });
           }
         } catch (pollError) {
           console.error(`❌ Error during Cashfree polling for order ID ${orderId}:`, pollError.response?.data || pollError.message);
-          // Log the error but continue with other orders
+          // Potentially mark the order in DB with an error status for manual review if repeated
         }
       }
     }
@@ -309,9 +309,7 @@ const pollCashfreePayments = async () => {
   }
 };
 
-// Schedule the polling task. Adjust frequency as needed.
-// For example, every 5 minutes: '*/5 * * * *'
-// For example, every 1 minute for testing: '* * * * *'
+// Schedule the polling task. Runs every 5 minutes.
 cron.schedule('*/5 * * * *', pollCashfreePayments, {
   scheduled: true,
   timezone: "Asia/Kolkata"
@@ -319,81 +317,8 @@ cron.schedule('*/5 * * * *', pollCashfreePayments, {
 
 console.log('Cashfree Payment Polling scheduler is active. It will run every 5 minutes.');
 
-// WEBHOOK ENDPOINT (kept as is, but it's no longer the primary method)
-app.post('/webhook', async (req, res) => {
-  console.log('--- Cashfree Webhook received ---', new Date().toISOString());
-
-  const xWebhookTimestamp = req.headers['x-webhook-timestamp'];
-  const xWebhookSignature = req.headers['x-webhook-signature'];
-  const xWebhookVersion = req.headers['x-webhook-version'];
-  const rawBody = req.rawBody;
-
-  console.log('Webhook Headers:', { xWebhookTimestamp, xWebhookSignature, xWebhookVersion });
-  console.log('Webhook Raw Body (length: ' + rawBody.length + '): ' + rawBody);
-
-  if (!xWebhookTimestamp || !xWebhookSignature || !rawBody) {
-    console.error('Webhook: Missing required headers or raw body for signature verification.');
-    return res.status(400).send('Bad Request: Missing required webhook data.');
-  }
-
-  if (!CASHFREE_WEBHOOK_SECRET) {
-    console.error('Webhook: CASHFREE_WEBHOOK_SECRET is not set or empty.');
-    return res.status(500).send('Server Error: Webhook secret not configured.');
-  }
-
-  try {
-    const dataToSign = xWebhookTimestamp + rawBody;
-    const hmac = crypto.createHmac('sha256', CASHFREE_WEBHOOK_SECRET);
-    hmac.update(dataToSign);
-    const generatedSignature = hmac.digest('base64');
-
-    if (generatedSignature !== xWebhookSignature) {
-      console.error('Webhook: Invalid signature. Generated and received signatures did not match.');
-      return res.status(401).send('Unauthorized: Invalid webhook signature.');
-    }
-
-    console.log('Webhook signature successfully verified.');
-
-    const webhookData = req.body;
-    console.log('Parsed Webhook Data:', webhookData);
-
-    const eventType = webhookData.event;
-    const orderDetails = webhookData.data.order;
-    const paymentDetails = webhookData.data.payment;
-
-    const orderId = orderDetails.order_id;
-    const mobileNumber = orderDetails.customer_details ? orderDetails.customer_details.customer_phone : null;
-
-    if (!orderId || !mobileNumber) {
-      console.error('Webhook: Could not extract orderId or mobileNumber from webhook payload.', webhookData);
-      return res.status(400).send('Bad Request: Invalid webhook payload structure.');
-    }
-
-    if (eventType === 'PAYMENT_SUCCESS_WEBHOOK') {
-      console.log(`Webhook: Payment success for Order ID: ${orderId}, Mobile: ${mobileNumber}`);
-      const result = await processSuccessfulRecharge(orderId, mobileNumber);
-      if (result.success) {
-        return res.status(200).send('Webhook processed successfully.');
-      } else {
-        console.error(`Webhook: Failed to process successful recharge for Order ID ${orderId}: ${result.message}`);
-        return res.status(200).send('Webhook received, but internal processing failed.');
-      }
-    } else if (eventType === 'PAYMENT_FAILED_WEBHOOK' || eventType === 'PAYMENT_USER_DROPPED_WEBHOOK') {
-      console.log(`Webhook: Payment ${eventType} for Order ID: ${orderId}, Mobile: ${mobileNumber}`);
-      const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-      await setDoc(orderRef, { status: eventType, timestamp: serverTimestamp() }, { merge: true })
-        .catch(e => console.error(`Error updating status for failed order ${orderId}:`, e));
-      return res.status(200).send('Webhook received and order status updated.');
-    } else {
-      console.log(`Webhook: Unhandled event type: ${eventType}`);
-      return res.status(200).send('Webhook received, event type not handled.');
-    }
-
-  } catch (error) {
-    console.error("Webhook processing error:", error);
-    res.status(200).send('Webhook received, but encountered an error during processing.');
-  }
-});
+// --- REMOVED WEBHOOK ENDPOINT ENTIRELY ---
+// I've removed the app.post('/webhook', ...) block as per your clear instruction.
 
 app.post('/trigger-deduction', async (req, res) => {
   console.log('Manually triggering deduction...');
@@ -405,6 +330,7 @@ app.post('/trigger-deduction', async (req, res) => {
   }
 });
 
+// Test endpoint for Cashfree sample signature (kept for independent testing if needed)
 app.get('/test-cashfree-sample-signature', (req, res) => {
   const webhooksignatureFromSample = 'EhW2Z+rTcC337M2hJMR4GxmivdwZIwyadTScjy33HEc=';
   const postDataFromSample = `{"data":{"order":{"order_id":"qwert59954432221","order_amount":1.00,"order_currency":"INR","order_tags":null},"payment":{"cf_payment_id":5114917039291,"payment_status":"SUCCESS","payment_amount":1.00,"payment_currency":"INR","payment_message":"Simulated response message","payment_time":"2025-03-28T18:59:39+05:30","bank_reference":"1234567890","auth_id":null,"payment_method":{"upi":{"channel":null,"upi_id":"testsuccess@gocash"}},"payment_group":"upi"},"customer_details":{"customer_name":null,"customer_id":"devstudio_user","customer_email":"test123@gmail.com","customer_phone":"8474090589"}},"event_time":"2025-03-28T19:00:02+05:30","type":"PAYMENT_SUCCESS_WEBHOOK"}`;
@@ -420,14 +346,8 @@ app.get('/test-cashfree-sample-signature', (req, res) => {
 
   console.log(`--- Test /test-cashfree-sample-signature ---`);
   console.log(`Cashfree Sample Expected Signature: "${webhooksignatureFromSample}"`);
-  console.log(`Your Generated Signature (for sample): "${generatedSignatureForSample}"`);
+  console.log(`Your Generated Signature (for sample)": "${generatedSignatureForSample}"`);
   console.log(`Match for Sample Data: ${match}`);
-  console.log(`Signed Payload Length (Sample): ${signedPayloadSample.length}`);
-  console.log(`Raw Body Length (Sample): ${postDataFromSample.length}`);
-  console.log(`Timestamp (Sample): ${timestampFromSample}`);
-  console.log(`Secret Key (Sample): "${secretKeyForTesting}"`);
-  console.log(`--- End Test ---`);
-
   res.json({
       "message": "Check server logs for comparison result.",
       "Cashfree Sample Expected Signature": webhooksignatureFromSample,
