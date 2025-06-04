@@ -19,6 +19,7 @@
     "express": "^4.21.2",
     "firebase": "^11.6.0",
     "firebase-admin": "^13.2.0",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "node-schedule": "^2.1.1"
   }
 }
