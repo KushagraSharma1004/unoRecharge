@@ -4,7 +4,7 @@ const { Cashfree } = require('cashfree-pg');
 require('dotenv').config();
 const cron = require('node-cron');
 const { initializeApp } = require('firebase/app');
-
+const schedule = require('node-schedule');
 const {
   getFirestore,
   collection,
@@ -177,7 +177,7 @@ const performDeduction = async () => {
 };
 
 // Cron schedule for 12 PM (noon) daily (0 minutes, 12 hours)
-cron.schedule('0 0 * * *', performDeduction, {
+schedule.scheduleJob('0 0 * * *', performDeduction, {
   scheduled: true,
   timezone: "Asia/Kolkata"
 });
