@@ -177,7 +177,7 @@ const performDeduction = async () => {
 };
 
 // Cron schedule for 12 PM (noon) daily (0 minutes, 12 hours)
-schedule.scheduleJob('59 23 * * *', performDeduction, {
+corn.schedule('59 23 * * *', performDeduction, {
   scheduled: true,
   timezone: "Asia/Kolkata"
 });
