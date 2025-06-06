@@ -213,7 +213,7 @@ app.post('/create-order', async (req, res) => {
         // Return URL for Cashfree. User will be redirected here.
         // It's crucial that your frontend picks up the order_id and mobileNumber from this URL
         // and then calls your /verify endpoint.
-        return_url: `https://unoshops.com/payment-status?order_id=${orderId}&mobileNumber=${mobileNumber}`,
+        return_url: `https://unoshops.com/?order_id=${orderId}&mobileNumber=${mobileNumber}`,
         plan_details: planDetails
       }
     };
