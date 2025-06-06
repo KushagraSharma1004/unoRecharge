@@ -85,7 +85,8 @@ const processSuccessfulRecharge = async (orderId, mobileNumber, paymentDetails =
               status: 'SUCCESS',
               timestamp: serverTimestamp(),
               paymentDetails: paymentDetails, // Use the passed paymentDetails
-              originalTimestamp: orderData.timestamp // Keep original timestamp if needed
+              originalTimestamp: orderData.timestamp, // Keep original timestamp if needed
+              plan: orderData.plan,
           });
           console.log(`Recharge history added for order ID ${orderId}, user ${mobileNumber}.`);
 
