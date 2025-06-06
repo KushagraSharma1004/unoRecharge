@@ -1,313 +1,776 @@
-const express = require('express');
-const cors = require('cors');
-const { Cashfree } = require('cashfree-pg');
-require('dotenv').config();
-const cron = require('node-cron');
-const { initializeApp } = require('firebase/app');
-const {
-  getFirestore,
-  collection,
-  getDocs,
-  writeBatch,
-  serverTimestamp,
-  doc,
-  getDoc,
-  setDoc,
-  deleteDoc,
-  runTransaction,
-  query,
-  where
-} = require('firebase/firestore');
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import PopupRecharge from './PopupRecharge'; // Assuming this is your existing recharge modal
+import RechargeSuccessPopup from './modals/RechargeSuccessPopup'; // Import the new success popup
 
-const app = express();
-app.use(cors());
+export default function Home() {
+  const [activeTab, setActiveTab] = useState('vendors');
+  const navigate = useNavigate();
+  const urlParams = new URLSearchParams(window.location.search);
+  const [rechargeModalVisible, setRechargeModalVisible] = useState(false);
+  const selectedPlanFromUrl = urlParams.get('selectedPlan') || '';
+  // Note: 'selectedPlan' is used for mobileNumber here, ensure it's the correct param from your Cashfree return_url
+  const mobileNumberForRechargeFromUrl = urlParams.get('mobileNumber') || '';
+  const orderIdFromUrl = urlParams.get('order_id') || '';
 
-app.use(express.json({ limit: '5mb' }));
+  // New state for success popup
+  const [showSuccessPopup, setShowSuccessPopup] = useState(false);
+  const [processedOrderId, setProcessedOrderId] = useState('');
+  const [showVerificationError, setShowVerificationError] = useState(false);
+  const [verificationErrorMessage, setVerificationErrorMessage] = useState('');
 
-const firebaseConfig = {
-  apiKey: process.env.FIREBASE_API_KEY,
-  authDomain: process.env.FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.FIREBASE_PROJECT_ID,
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.FIREBASE_APP_ID
-};
+  // --- useEffect to handle Cashfree redirection and verify payment ---
+  useEffect(() => {
+    const verifyPayment = async () => {
+      // Clear URL parameters after reading them to prevent re-triggering on refresh
+      const newUrl = new URL(window.location.href);
+      let paramsRemoved = false;
+      if (newUrl.searchParams.has('order_id')) {
+        newUrl.searchParams.delete('order_id');
+        paramsRemoved = true;
+      }
+      if (newUrl.searchParams.has('mobileNumber')) {
+        newUrl.searchParams.delete('mobileNumber');
+        paramsRemoved = true;
+      }
 
-const firebaseApp = initializeApp(firebaseConfig);
-const db = getFirestore(firebaseApp);
+      // Replace history state to clean the URL without reloading the page
+      if (paramsRemoved) {
+        window.history.replaceState({}, document.title, newUrl.pathname + newUrl.search);
+      }
 
-Cashfree.XClientId = process.env.CLIENT_ID;
-Cashfree.XClientSecret = process.env.CLIENT_SECRET;
-Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Or Cashfree.Environment.SANDBOX
-
-// --- Streamlined Function to Process Successful Recharge ---
-const processSuccessfulRecharge = async (orderId, mobileNumber, paymentDetails = {}) => {
-  const temporaryOrderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-  const userProfileRef = doc(db, 'users', mobileNumber);
-
-  try {
-      await runTransaction(db, async (transaction) => {
-          // --- ALL READS MUST COME FIRST ---
-
-          // Read 1: Get the user's profile to update balance
-          const userProfileDoc = await transaction.get(userProfileRef);
-          if (!userProfileDoc.exists()) {
-              throw new Error(`User profile for ${mobileNumber} not found.`);
-          }
-          const currentBalance = userProfileDoc.data().balance || 0;
-
-          // Read 2: Get the temporary order document to retrieve details for history
-          const temporaryOrderDoc = await transaction.get(temporaryOrderRef);
-          if (!temporaryOrderDoc.exists()) {
-              console.warn(`Temporary order ${orderId} not found during successful processing. It might have been processed by another job or removed.`);
-              throw new Error(`Temporary order ${orderId} not found, cannot proceed with processing.`);
-          }
-          const orderData = temporaryOrderDoc.data();
-
-          // Ensure rechargeAmount is a number and exists
-          const rechargeAmount = typeof orderData.amount === 'number' ? orderData.amount : parseFloat(orderData.amount) || 0;
-          if (rechargeAmount <= 0) {
-              throw new Error(`Invalid recharge amount received for order ${orderId}: ${orderData.amount}`);
-          }
-
-          // --- ALL WRITES MUST COME AFTER ALL READS ---
-
-          // Write 1: Update user balance
-          const newBalance = currentBalance + rechargeAmount;
-          transaction.update(userProfileRef, { balance: newBalance });
-          console.log(`Updated balance for user ${mobileNumber} to ${newBalance}.`);
-
-          // Write 2: Add to recharge history
-          const rechargeHistoryRef = collection(db, `users/${mobileNumber}/rechargeHistory`);
-          transaction.set(doc(rechargeHistoryRef), {
-              orderId: orderId,
-              amount: rechargeAmount,
-              status: 'SUCCESS',
-              timestamp: serverTimestamp(),
-              paymentDetails: paymentDetails, // Use the passed paymentDetails
-              originalTimestamp: orderData.timestamp // Keep original timestamp if needed
+      if (orderIdFromUrl && mobileNumberForRechargeFromUrl) {
+        console.log("Attempting to verify payment from URL parameters...");
+        try {
+          const response = await fetch('https://unorecharge.onrender.com/verify', { // Adjust endpoint if your backend is on a different URL
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              orderId: orderIdFromUrl,
+              mobileNumber: mobileNumberForRechargeFromUrl,
+            }),
           });
-          console.log(`Recharge history added for order ID ${orderId}, user ${mobileNumber}.`);
 
-          // Write 3: Delete the temporary order
-          transaction.delete(temporaryOrderRef);
-          console.log(`Temporary order ${orderId} deleted.`);
+          const data = await response.json();
+          console.log('Verification response:', data);
 
-          console.log(`Order ${orderId} for user ${mobileNumber} successfully processed.`);
-      });
-      return { success: true, message: `Recharge for order ${orderId} processed successfully.` };
-  } catch (error) {
-      console.error(`❌ Error during transaction for order ID ${orderId}, user ${mobileNumber}:`, error.message);
-      if (error.code) {
-          console.error(`Firestore error code: ${error.code}`);
-      }
-
-      // Attempt to update the status of the temporary order to reflect the processing failure.
-      try {
-          await setDoc(
-              temporaryOrderRef,
-              {
-                  status: 'TRANSACTION_FAILED',
-                  lastError: error.message,
-                  processedAt: serverTimestamp()
-              },
-              { merge: true }
-          );
-          console.log(`Updated temporary order ${orderId} to 'TRANSACTION_FAILED'.`);
-      } catch (setErr) {
-          console.error(`Failed to update temporary order ${orderId} status after transaction error:`, setErr.message);
-      }
-      return { success: false, message: error.message };
-  }
-};
-
-// --- Daily deduction cron job: Runs at 12 PM (noon) Asia/Kolkata time ---
-const performDeduction = async () => {
-  try {
-    console.log('Starting balance deduction process...', new Date().toISOString());
-    const usersCol = collection(db, 'users');
-    const usersSnapshot = await getDocs(usersCol);
-    const deductionAmount = 12;
-
-    if (usersSnapshot.empty) {
-      console.log('No users found to process.', new Date().toISOString());
-      return;
-    }
-
-    const batch = writeBatch(db);
-    let processedCount = 0;
-
-    usersSnapshot.forEach((userDoc) => {
-      const userData = userDoc.data();
-      const currentBalance = userData.balance || 0;
-
-      if (currentBalance >= deductionAmount) {
-        const newBalance = currentBalance - deductionAmount;
-        batch.update(userDoc.ref, {
-          balance: newBalance,
-          lastDeduction: serverTimestamp()
-        });
-
-        const deductionsCol = collection(db, `users/${userDoc.id}/deductions`);
-        const deductionRef = doc(deductionsCol);
-        batch.set(deductionRef, {
-          amount: deductionAmount,
-          previousBalance: currentBalance,
-          newBalance: newBalance,
-          timestamp: serverTimestamp(),
-          type: 'daily_charge'
-        });
-        processedCount++;
-      }
-    });
-
-    if (processedCount > 0) {
-      await batch.commit();
-      console.log(`✅ Success: Deducted ₹${deductionAmount} from ${processedCount} users.`, new Date().toISOString());
-    } else {
-      console.log('No users had sufficient balance for deduction.', new Date().toISOString());
-    }
-  } catch (error) {
-    console.error('❌ Deduction failed:', error, new Date().toISOString());
-  }
-};
-
-// Cron schedule for 12 PM (noon) daily (0 minutes, 12 hours)
-cron.schedule('59 23 * * *', performDeduction, {
-  scheduled: true,
-  timezone: "Asia/Kolkata"
-});
-
-console.log('Scheduler is active. Daily deduction will run at 12 PM (noon) Asia/Kolkata time.');
-
-
-// --- Create payment order endpoint ---
-app.post('/create-order', async (req, res) => {
-  try {
-    const { plan, amount, planDetails, mobileNumber, shopName, orderId } = req.body;
-
-    if (!plan || !amount || !planDetails || !mobileNumber || !shopName || !orderId) {
-      return res.status(400).json({ error: "All fields are required" });
-    }
-
-    // Store order details temporarily in Firestore
-    const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-    await setDoc(orderRef, {
-      plan: plan,
-      amount: amount,
-      timestamp: serverTimestamp(),
-      mobileNumber: mobileNumber,
-      shopName: shopName
-    });
-    console.log(`Order ${orderId} details saved to Firestore for user ${mobileNumber}.`);
-
-    const request = {
-      order_amount: amount,
-      order_currency: "INR",
-      order_id: orderId,
-      customer_details: {
-        customer_id: shopName,
-        customer_phone: mobileNumber
-      },
-      order_meta: {
-        // Return URL for Cashfree. User will be redirected here.
-        // It's crucial that your frontend picks up the order_id and mobileNumber from this URL
-        // and then calls your /verify endpoint.
-        return_url: `https://unoshops.com/?order_id=${orderId}&mobileNumber=${mobileNumber}`,
-        plan_details: planDetails
+          if (data.success) {
+            setProcessedOrderId(orderIdFromUrl);
+            setShowSuccessPopup(true);
+            // Optionally, you can navigate or update other UI elements here
+          } else {
+            // Handle specific statuses like FAILED, PENDING, etc.
+            console.error('Payment verification failed or is pending:', data.message);
+            setShowVerificationError(true);
+            setVerificationErrorMessage(data.message || 'Payment could not be verified. Please check your payment status.');
+          }
+        } catch (error) {
+          console.error('Error during payment verification:', error);
+          setShowVerificationError(true);
+          setVerificationErrorMessage('An error occurred during verification. Please contact support.');
+        }
       }
     };
 
-    const response = await Cashfree.PGCreateOrder("2023-08-01", request);
-    res.json(response.data);
-  } catch (error) {
-    console.error("Order creation error:", error);
-    // Clean up initiated order in Firestore if Cashfree order creation fails
-    if (req.body.orderId && req.body.mobileNumber) {
-      const orderRef = doc(db, `users/${req.body.mobileNumber}/rechargesOrderIds/${req.body.orderId}`);
-      await deleteDoc(orderRef).catch(e => console.error("Error deleting failed order from Firestore:", e));
-      console.log(`Cleaned up initiated order ${req.body.orderId} due to Cashfree order creation failure.`);
+    // Only run verification if orderId and mobileNumber are present in the URL
+    if (orderIdFromUrl && mobileNumberForRechargeFromUrl) {
+      verifyPayment();
     }
-    res.status(500).json({
-      error: error.response?.data?.message || "Failed to create order"
-    });
-  }
-});
+  }, []); // Empty dependency array means this runs once on component mount
 
-
-// --- New Endpoint: Verify Payment Status from Frontend ---
-app.post('/verify', async (req, res) => {
-  const { orderId, mobileNumber } = req.body;
-
-  if (!orderId || !mobileNumber) {
-    return res.status(400).json({ success: false, message: 'orderId and mobileNumber are required.' });
-  }
-
-  const temporaryOrderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-
-  try {
-    console.log(`Verifying payment for Order ID: ${orderId}, User: ${mobileNumber}`);
-    const cfResponse = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
-
-    console.log(`Cashfree API response 'data' for Order ID ${orderId}:`, JSON.stringify(cfResponse.data, null, 2));
-
-    const paymentsArray = cfResponse?.data ?? [];
-
-    if (!Array.isArray(paymentsArray) || paymentsArray.length === 0) {
-      console.warn(`Verification: No valid payment details (empty or non-array) found in Cashfree response for order ${orderId}.`);
-      await setDoc(temporaryOrderRef, { status: 'NO_CF_DATA', processedAt: serverTimestamp() }, { merge: true });
-      return res.status(200).json({ success: false, status: 'NO_PAYMENT_DETAILS', message: 'No payment details found for this order.' });
+  const testimonials = [
+    {
+      text: "Increased my sales by 200% with worldwide reach",
+      author: "Rajesh, Delhi",
+      avatar: "👨‍💼"
+    },
+    {
+      text: "Simplest inventory system I've ever used",
+      author: "Priya, Mumbai",
+      avatar: "👩‍💻"
+    },
+    {
+      text: "Found unique products I couldn't find anywhere else",
+      author: "Amit, Bangalore",
+      avatar: "👨‍🎓"
     }
+  ];
 
-    const payment = paymentsArray[0]; // Get the first payment object
-    const paymentStatus = payment.payment_status;
-
-    console.log(`Verification: Cashfree reported Status for ${orderId}: ${paymentStatus}`);
-
-    if (paymentStatus === 'SUCCESS') {
-      console.log(`Verification: Payment confirmed as SUCCESS for Order ID ${orderId}. Initiating processing.`);
-      const result = await processSuccessfulRecharge(orderId, mobileNumber, payment); // Pass payment details
-      if (result.success) {
-        return res.status(200).json({ success: true, status: 'SUCCESS', message: 'Recharge successful and balance updated.' });
-      } else {
-        // If processSuccessfulRecharge failed, it would have already updated the temp order status
-        return res.status(500).json({ success: false, status: 'PROCESSING_FAILED', message: result.message });
-      }
-    } else if (paymentStatus === 'FAILED' || paymentStatus === 'CANCELLED') {
-      console.log(`Verification: Payment ${orderId} confirmed as ${paymentStatus}. Marking in Firestore.`);
-      await setDoc(temporaryOrderRef, { status: paymentStatus, processedAt: serverTimestamp() }, { merge: true });
-      return res.status(200).json({ success: false, status: paymentStatus, message: `Recharge ${paymentStatus.toLowerCase()}.` });
-    } else if (paymentStatus === 'PENDING') {
-      console.log(`Verification: Payment ${orderId} is still PENDING. Frontend should try again or instruct user to wait.`);
-      // We don't delete the temporary order here, as it's still pending
-      return res.status(200).json({ success: false, status: 'PENDING', message: 'Payment is still pending. Please wait or try again later.' });
-    } else {
-      console.log(`Verification: Payment status for Order ID ${orderId} is: ${paymentStatus}. Unhandled status.`);
-      await setDoc(temporaryOrderRef, { status: `UNHANDLED_STATUS_${paymentStatus}`, processedAt: serverTimestamp() }, { merge: true });
-      return res.status(200).json({ success: false, status: 'UNHANDLED_STATUS', message: `Unhandled payment status: ${paymentStatus}.` });
+  const vendorFeatures = [
+    {
+      title: "Stock Management",
+      desc: "Real-time inventory tracking",
+      icon: "📊",
+      img: "https://images.unsplash.com/photo-1551288049-bebda4e38f71?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    },
+    {
+      title: "SKU Management",
+      desc: "Organize products with custom SKUs and categories",
+      icon: "#️⃣",
+      img: "https://images.unsplash.com/photo-1579621970563-ebec7560ff3e?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    },
+    {
+      title: "Image Upload",
+      desc: "Bulk upload product images with ease",
+      icon: "🖼️",
+      img: "https://images.unsplash.com/photo-1522542550221-31fd19575a2d?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    },
+    {
+      title: "Global Reach",
+      desc: "Sell to customers worldwide with localized support",
+      icon: "🌎",
+      img: "https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    },
+    {
+      title: "Order Dashboard",
+      desc: "Get all orders in one unified dashboard",
+      icon: "🛒",
+      img: "https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
     }
-  } catch (error) {
-    console.error(`❌ Verification Error for Order ID ${orderId}, User ${mobileNumber}:`, error.message);
-    // Update temporary order status to indicate an error during verification
-    await setDoc(temporaryOrderRef, { status: 'VERIFICATION_ERROR', lastError: error.message, processedAt: serverTimestamp() }, { merge: true });
-    return res.status(500).json({ success: false, status: 'SERVER_ERROR', message: `Server error during verification: ${error.message}` });
-  }
-});
+  ];
 
-// Manual trigger for deduction (retained, untouched)
-app.post('/trigger-deduction', async (req, res) => {
-  console.log('Manually triggering deduction...');
-  try {
-    await performDeduction();
-    res.status(200).json({ success: true, message: 'Deduction process finished successfully.' });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Deduction process failed.', error: error.message });
-  }
-});
+  const customerFeatures = [
+    {
+      title: "Global Marketplace",
+      desc: "Shop from vendors across the world",
+      icon: "🛍️",
+      img: "https://images.unsplash.com/photo-1483985988355-763728e1935b?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    },
+    {
+      title: "Smart Search",
+      desc: "Find exactly what you need with advanced filters",
+      icon: "🔍",
+      img: "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    },
+    {
+      title: "One-Cart Checkout",
+      desc: "Buy from multiple vendors in a single transaction",
+      icon: "🛒",
+      img: "https://images.unsplash.com/photo-1523275335684-37898b6baf30?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    },
+    {
+      title: "Order Tracking",
+      desc: "Real-time updates on all your purchases",
+      icon: "🚚",
+      img: "https://images.unsplash.com/photo-1504270997636-07ddfbd48945?ixlib=rb-1.2.1&auto=format&fit=crop&w=500&q=80"
+    }
+  ];
 
-// REMOVED: Manual trigger for polling is no longer needed
+  return (
+    <div style={{
+      fontFamily: "'Poppins', sans-serif",
+      maxWidth: '100%',
+      margin: 0,
+      padding: 0,
+      backgroundColor: '#f9f9f9',
+      color: '#333',
+      minHeight: '100vh'
+    }}>
+      {/* Header */}
+      <header style={{
+        backgroundColor: '#fff',
+        padding: '15px 20px',
+        boxShadow: '0 2px 20px rgba(0,0,0,0.08)',
+        position: 'sticky',
+        top: 0,
+        zIndex: 100
+      }}>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          maxWidth: '1200px',
+          margin: '0 auto'
+        }}>
+          <div style={{
+            fontSize: '24px',
+            fontWeight: 'bold',
+            color: '#4CAF50',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px'
+          }}>
+            <img style={{height:40, width:40, borderRadius:'50%'}} src="/usLogo.png" alt="" />
+            UNOSHOPS
+          </div>
+          <div style={{
+            display: 'flex',
+            gap: '20px'
+          }}>
+            <button
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: '8px 0',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: activeTab === 'vendors' ? '#4CAF50' : '#555',
+                cursor: 'pointer',
+                position: 'relative',
+                marginLeft:10
+              }}
+              onClick={() => setActiveTab('vendors')}
+            >
+              For Vendors
+              {activeTab === 'vendors' && <span style={{
+                position: 'absolute',
+                bottom: '-5px',
+                left: '0',
+                width: '100%',
+                height: '3px',
+                backgroundColor: '#4CAF50',
+                borderRadius: '3px'
+              }}></span>}
+            </button>
+            <button
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: '8px 0',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: activeTab === 'customers' ? '#4CAF50' : '#555',
+                cursor: 'pointer',
+                position: 'relative'
+              }}
+              onClick={() => setActiveTab('customers')}
+            >
+              For Customers
+              {activeTab === 'customers' && <span style={{
+                position: 'absolute',
+                bottom: '-5px',
+                left: '0',
+                width: '100%',
+                height: '3px',
+                backgroundColor: '#4CAF50',
+                borderRadius: '3px'
+              }}></span>}
+            </button>
+          </div>
+        </div>
+      </header>
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+      {/* Hero Section */}
+      <section style={{
+        textAlign: 'center',
+        padding: '60px 20px',
+        background: 'linear-gradient(135deg, #4CAF50 0%, #8BC34A 100%)',
+        color: 'white',
+        position: 'relative',
+        overflow: 'hidden'
+      }}>
+        <div style={{
+          position: 'absolute',
+          top: '-50px',
+          right: '-50px',
+          width: '200px',
+          height: '200px',
+          borderRadius: '50%',
+          backgroundColor: 'rgba(255,255,255,0.1)'
+        }}></div>
+        <div style={{
+          position: 'absolute',
+          bottom: '-80px',
+          left: '-80px',
+          width: '300px',
+          height: '300px',
+          borderRadius: '50%',
+          backgroundColor: 'rgba(255,255,255,0.1)'
+        }}></div>
+        <div style={{
+          maxWidth: '800px',
+          margin: '0 auto',
+          position: 'relative',
+          zIndex: 1
+        }}>
+          <h1 style={{
+            fontSize: '2.5rem',
+            fontWeight: '700',
+            marginBottom: '20px',
+            lineHeight: '1.2'
+          }}>
+            {activeTab === 'vendors'
+              ? 'Grow Your Business Worldwide'
+              : 'Shop From Global Vendors'}
+          </h1>
+          <p style={{
+            fontSize: '1.1rem',
+            marginBottom: '30px',
+            maxWidth: '600px',
+            marginLeft: 'auto',
+            marginRight: 'auto',
+            opacity: 0.9
+          }}>
+            {activeTab === 'vendors'
+              ? 'Join thousands of vendors selling to customers across the globe with our powerful platform'
+              : 'Discover unique products from carefully curated vendors worldwide'}
+          </p>
+          <a
+            href={activeTab === 'vendors' ? 'https://vendors.unoshops.com' : 'https://customers.unoshops.com'}
+            style={{
+              display: 'inline-block',
+              backgroundColor: 'white',
+              color: '#4CAF50',
+              padding: '15px 40px',
+              borderRadius: '30px',
+              textDecoration: 'none',
+              fontWeight: '600',
+              fontSize: '1rem',
+              boxShadow: '0 10px 30px rgba(0,0,0,0.15)',
+              transition: 'all 0.3s ease',
+              ':hover': {
+                transform: 'translateY(-3px)',
+                boxShadow: '0 15px 30px rgba(0,0,0,0.2)'
+              }
+            }}
+          >
+            {activeTab === 'vendors' ? 'Start Selling →' : 'Start Shopping →'}
+          </a>
+        </div>
+      </section>
+
+      {/* Features Section */}
+      <section style={{
+        padding: '20px',
+        maxWidth: '1200px',
+        margin: '0 auto'
+      }}>
+        <h2 style={{
+          textAlign: 'center',
+          fontSize: '2rem',
+          marginBottom: '50px',
+          color: '#333',
+          position: 'relative',
+          display: 'inline-block',
+          marginLeft: '50%',
+          transform: 'translateX(-50%)'
+        }}>
+          {activeTab === 'vendors' ? 'Vendor Features' : 'Customer Benefits'}
+          <span style={{
+            position: 'absolute',
+            bottom: '-10px',
+            left: '50%',
+            width: '50px',
+            height: '3px',
+            backgroundColor: '#4CAF50',
+            transform: 'translateX(-50%)'
+          }}></span>
+        </h2>
+
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          gap: '30px'
+        }}>
+          {(activeTab === 'vendors' ? vendorFeatures : customerFeatures).map((feature, index) => (
+            <div key={index} style={{
+              backgroundColor: 'white',
+              borderRadius: '15px',
+              overflow: 'hidden',
+              boxShadow: '0 10px 30px rgba(0,0,0,0.08)',
+              transition: 'all 0.3s ease',
+              ':hover': {
+                transform: 'translateY(-10px)',
+                boxShadow: '0 15px 40px rgba(0,0,0,0.12)'
+              }
+            }}>
+              <div style={{
+                height: '200px',
+                backgroundImage: `url(${feature.img})`,
+                backgroundSize: 'cover',
+                backgroundPosition: 'center',
+                position: 'relative'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '20px',
+                  right: '20px',
+                  backgroundColor: 'rgba(76, 175, 80, 0.9)',
+                  color: 'white',
+                  width: '50px',
+                  height: '50px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '24px'
+                }}>
+                  {feature.icon}
+                </div>
+              </div>
+              <div style={{
+                padding: '25px'
+              }}>
+                <h3 style={{
+                  fontSize: '1.3rem',
+                  fontWeight: '600',
+                  marginBottom: '15px',
+                  color: '#4CAF50'
+                }}>
+                  {feature.title}
+                </h3>
+                <p style={{
+                  fontSize: '1rem',
+                  color: '#666',
+                  lineHeight: '1.6'
+                }}>
+                  {feature.desc}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Testimonials */}
+      <section style={{
+        padding: '20px 20px',
+        backgroundColor: '#f8faf8',
+        backgroundImage: 'radial-gradient(#4CAF50 1px, transparent 1px)',
+        backgroundSize: '20px 20px'
+      }}>
+        <div style={{
+          maxWidth: '1200px',
+          margin: '0 auto'
+        }}>
+          <h2 style={{
+            textAlign: 'center',
+            fontSize: '2rem',
+            marginBottom: '50px',
+            color: '#333'
+          }}>
+            Success Stories
+          </h2>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+            gap: '30px'
+          }}>
+            {testimonials.map((testimonial, index) => (
+              <div key={index} style={{
+                backgroundColor: 'white',
+                padding: '30px',
+                borderRadius: '15px',
+                boxShadow: '0 10px 30px rgba(0,0,0,0.05)',
+                position: 'relative'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: '-20px',
+                  left: '30px',
+                  backgroundColor: '#4CAF50',
+                  color: 'white',
+                  width: '60px',
+                  height: '60px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '30px'
+                }}>
+                  {testimonial.avatar}
+                </div>
+                <p style={{
+                  fontSize: '1.1rem',
+                  fontStyle: 'italic',
+                  marginBottom: '20px',
+                  color: '#555',
+                  lineHeight: '1.6',
+                  paddingTop: '30px'
+                }}>
+                  "{testimonial.text}"
+                </p>
+                <p style={{
+                  fontWeight: '600',
+                  color: '#4CAF50',
+                  textAlign: 'right',
+                  fontSize: '1rem'
+                }}>
+                  — {testimonial.author}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* CTA Section */}
+      <section style={{
+        padding: '80px 20px',
+        textAlign: 'center',
+        background: 'linear-gradient(135deg, #4CAF50 0%, #8BC34A 100%)',
+        color: 'white'
+      }}>
+        <div style={{
+          maxWidth: '800px',
+          margin: '0 auto'
+        }}>
+          <h2 style={{
+            fontSize: '2rem',
+            marginBottom: '20px'
+          }}>
+            Ready to {activeTab === 'vendors' ? 'grow your business' : 'start shopping'}?
+          </h2>
+          <p style={{
+            fontSize: '1.1rem',
+            marginBottom: '30px',
+            opacity: 0.9
+          }}>
+            Join thousands of {activeTab === 'vendors' ? 'vendors' : 'customers'} already using Unoshops
+          </p>
+          <a
+            href={activeTab === 'vendors' ? 'https://vendors.unoshops.com' : 'https://customers.unoshops.com'}
+            style={{
+              display: 'inline-block',
+              backgroundColor: 'white',
+              color: '#4CAF50',
+              padding: '15px 40px',
+              borderRadius: '30px',
+              textDecoration: 'none',
+              fontWeight: '600',
+              fontSize: '1rem',
+              boxShadow: '0 10px 30px rgba(0,0,0,0.15)',
+              transition: 'all 0.3s ease',
+              ':hover': {
+                transform: 'translateY(-3px)',
+                boxShadow: '0 15px 30px rgba(0,0,0,0.2)'
+              }
+            }}
+          >
+            {activeTab === 'vendors' ? 'Join as Vendor →' : 'Start Shopping →'}
+          </a>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer style={{
+        backgroundColor: '#2c3e50',
+        color: 'white',
+        padding: '50px 20px 30px',
+        textAlign: 'center'
+      }}>
+        <div style={{
+          maxWidth: '1200px',
+          margin: '0 auto',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
+          gap: '40px',
+          textAlign: 'left'
+        }}>
+          <div>
+            <div style={{
+              fontSize: '24px',
+              fontWeight: 'bold',
+              color: '#4CAF50',
+              marginBottom: '20px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              <img style={{height:40, width:40, borderRadius:'50%'}} src="/usLogo.png" alt="" />
+              UNOSHOPS
+            </div>
+            <p style={{
+              fontSize: '0.9rem',
+              lineHeight: '1.6',
+              opacity: 0.8
+            }}>
+              Connecting vendors with customers worldwide through our innovative platform.
+            </p>
+          </div>
+          <div>
+            <h3 style={{
+              fontSize: '1.2rem',
+              fontWeight: '600',
+              marginBottom: '20px',
+              color: '#4CAF50'
+            }}>Quick Links</h3>
+            <ul style={{
+              listStyle: 'none',
+              padding: 0,
+              margin: 0
+            }}>
+              <li style={{ marginBottom: '10px' }}><a href="https://vendors.unoshops.com" style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>For Vendors</a></li>
+              <li style={{ marginBottom: '10px' }}><a href="https://customers.unoshops.com" style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>For Customers</a></li>
+              {activeTab === 'vendors' && <div><li style={{ marginBottom: '10px' }}><a onClick={() => navigate('/AboutUs/')} style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>About Us</a></li>
+              <li style={{ marginBottom: '10px' }}><a onClick={() => navigate('/ContactUs/')} style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>Contact Us</a></li>
+              <li style={{ marginBottom: '10px' }}><a onClick={() => navigate('/VendorsTermsAndConditions/')} style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>Vendors T&C</a></li>
+              <li style={{ marginBottom: '10px' }}><a onClick={() => setRechargeModalVisible(!rechargeModalVisible)} style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>Recharge</a></li>
+              <li style={{ marginBottom: '10px' }}><a onClick={() => navigate('/PrivacyPolicy/')} style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>Privacy Policy</a></li>
+              <li style={{ marginBottom: '10px' }}><a onClick={() => navigate('/RefundPolicy/')} style={{
+                color: 'white',
+                textDecoration: 'none',
+                fontSize: '0.9rem',
+                opacity: 0.8,
+                transition: 'all 0.2s ease',
+                ':hover': {
+                  opacity: 1,
+                  color: '#4CAF50'
+                }
+              }}>Refund Policy</a></li></div>}
+            </ul>
+          </div>
+          <div>
+            <h3 style={{
+              fontSize: '1.2rem',
+              fontWeight: '600',
+              marginBottom: '20px',
+              color: '#4CAF50'
+            }}>Contact Us</h3>
+            <p style={{
+              fontSize: '0.9rem',
+              marginBottom: '15px',
+              opacity: 0.8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              <span>📧</span> unoshops1@gmail.com
+            </p>
+          </div>
+        </div>
+        <div style={{
+          marginTop: '50px',
+          paddingTop: '30px',
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          textAlign: 'center'
+        }}>
+          <p style={{
+            fontSize: '0.8rem',
+            opacity: 0.7
+          }}>
+            © {new Date().getFullYear()} Unoshops. All rights reserved.
+          </p>
+        </div>
+      </footer>
+      {rechargeModalVisible && <div style={{position:'fixed', top:'50%', left:'50%', transform:'translate(-50%, -50%)', display:'flex', alignItems:'center', justifyContent:'center', width:'100%', zIndex:1}} >
+        <PopupRecharge mobileNumberForRechargeFromUrl={mobileNumberForRechargeFromUrl} selectedPlanFromUrl={selectedPlanFromUrl}/>
+        <img onClick={() => setRechargeModalVisible(!rechargeModalVisible)} style={{height:20, width:20, position:'fixed', top:5, right:'5%', padding:2, backgroundColor:'white'}} src="/crossImage.png" alt="" />
+      </div>}
+
+      {/* Conditional rendering for the success popup */}
+      {showSuccessPopup && (
+        <RechargeSuccessPopup
+          onClose={() => setShowSuccessPopup(false)}
+          orderId={processedOrderId}
+        />
+      )}
+
+      {/* Conditional rendering for verification error message */}
+      {showVerificationError && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          backgroundColor: 'rgba(255, 0, 0, 0.2)', // Light red overlay
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 999
+        }}>
+          <div style={{
+            backgroundColor: '#fff',
+            padding: '30px',
+            borderRadius: '10px',
+            boxShadow: '0 5px 20px rgba(0,0,0,0.1)',
+            textAlign: 'center',
+            maxWidth: '400px',
+            width: '90%',
+            color: '#D32F2F' // Red text for error
+          }}>
+            <h3>Verification Error!</h3>
+            <p>{verificationErrorMessage}</p>
+            <button
+              onClick={() => setShowVerificationError(false)}
+              style={{
+                backgroundColor: '#D32F2F',
+                color: 'white',
+                padding: '10px 20px',
+                border: 'none',
+                borderRadius: '5px',
+                marginTop: '20px',
+                cursor: 'pointer'
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
