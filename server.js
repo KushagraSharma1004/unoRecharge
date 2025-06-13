@@ -41,9 +41,9 @@ Cashfree.XClientSecret = process.env.CLIENT_SECRET;
 Cashfree.XEnvironment = Cashfree.Environment.PRODUCTION; // Or Cashfree.Environment.SANDBOX
 
 // --- Streamlined Function to Process Successful Recharge ---
-const processSuccessfulRecharge = async (orderId, mobileNumber, paymentDetails = {}) => {
-  const temporaryOrderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
-  const userProfileRef = doc(db, 'users', mobileNumber);
+const processSuccessfulRecharge = async (orderId, vendorMobileNumber, paymentDetails = {}) => {
+  const temporaryOrderRef = doc(db, `users/${vendorMobileNumber}/rechargesOrderIds/${orderId}`);
+  const userProfileRef = doc(db, 'users', vendorMobileNumber);
 
   try {
       await runTransaction(db, async (transaction) => {
@@ -52,7 +52,7 @@ const processSuccessfulRecharge = async (orderId, mobileNumber, paymentDetails =
           // Read 1: Get the user's profile to update balance
           const userProfileDoc = await transaction.get(userProfileRef);
           if (!userProfileDoc.exists()) {
-              throw new Error(`User profile for ${mobileNumber} not found.`);
+              throw new Error(`User profile for ${vendorMobileNumber} not found.`);
           }
           const currentBalance = userProfileDoc.data().balance || 0;
 
@@ -75,10 +75,10 @@ const processSuccessfulRecharge = async (orderId, mobileNumber, paymentDetails =
           // Write 1: Update user balance
           const newBalance = currentBalance + rechargeAmount;
           transaction.update(userProfileRef, { balance: newBalance });
-          console.log(`Updated balance for user ${mobileNumber} to ${newBalance}.`);
+          console.log(`Updated balance for user ${vendorMobileNumber} to ${newBalance}.`);
 
           // Write 2: Add to recharge history
-          const rechargesRef = collection(db, `users/${mobileNumber}/recharges`);
+          const rechargesRef = collection(db, `users/${vendorMobileNumber}/recharges`);
           transaction.set(doc(rechargesRef), {
               orderId: orderId,
               amount: rechargeAmount,
@@ -88,17 +88,17 @@ const processSuccessfulRecharge = async (orderId, mobileNumber, paymentDetails =
               originalTimestamp: orderData.timestamp, // Keep original timestamp if needed
               plan: orderData.plan,
           });
-          console.log(`Recharge history added for order ID ${orderId}, user ${mobileNumber}.`);
+          console.log(`Recharge history added for order ID ${orderId}, user ${vendorMobileNumber}.`);
 
           // Write 3: Delete the temporary order
           transaction.delete(temporaryOrderRef);
           console.log(`Temporary order ${orderId} deleted.`);
 
-          console.log(`Order ${orderId} for user ${mobileNumber} successfully processed.`);
+          console.log(`Order ${orderId} for user ${vendorMobileNumber} successfully processed.`);
       });
       return { success: true, message: `Recharge for order ${orderId} processed successfully.` };
   } catch (error) {
-      console.error(`❌ Error during transaction for order ID ${orderId}, user ${mobileNumber}:`, error.message);
+      console.error(`❌ Error during transaction for order ID ${orderId}, user ${vendorMobileNumber}:`, error.message);
       if (error.code) {
           console.error(`Firestore error code: ${error.code}`);
       }
@@ -185,36 +185,36 @@ console.log('Scheduler is active. Daily deduction will run at 12 PM (noon) Asia/
 // --- Create payment order endpoint ---
 app.post('/create-order', async (req, res) => {
   try {
-    const { plan, amount, planDetails, mobileNumber, shopName, orderId } = req.body;
+    const { plan, amount, planDetails, vendorMobileNumber, businessName, orderId } = req.body;
 
-    if (!plan || !amount || !planDetails || !mobileNumber || !shopName || !orderId) {
+    if (!plan || !amount || !planDetails || !vendorMobileNumber || !businessName || !orderId) {
       return res.status(400).json({ error: "All fields are required" });
     }
 
     // Store order details temporarily in Firestore
-    const orderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
+    const orderRef = doc(db, `users/${vendorMobileNumber}/rechargesOrderIds/${orderId}`);
     await setDoc(orderRef, {
       plan: plan,
       amount: amount,
       timestamp: serverTimestamp(),
-      mobileNumber: mobileNumber,
-      shopName: shopName
+      vendorMobileNumber: vendorMobileNumber,
+      businessName: businessName
     });
-    console.log(`Order ${orderId} details saved to Firestore for user ${mobileNumber}.`);
+    console.log(`Order ${orderId} details saved to Firestore for user ${vendorMobileNumber}.`);
 
     const request = {
       order_amount: amount,
       order_currency: "INR",
       order_id: orderId,
       customer_details: {
-        customer_id: shopName,
-        customer_phone: mobileNumber
+        customer_id: businessName,
+        customer_phone: vendorMobileNumber
       },
       order_meta: {
         // Return URL for Cashfree. User will be redirected here.
-        // It's crucial that your frontend picks up the order_id and mobileNumber from this URL
+        // It's crucial that your frontend picks up the order_id and vendorMobileNumber from this URL
         // and then calls your /verify endpoint.
-        return_url: `https://unoshops.com/?order_id=${orderId}&mobileNumber=${mobileNumber}`,
+        return_url: `https://unoshops.com/?order_id=${orderId}&vendorMobileNumber=${vendorMobileNumber}`,
         plan_details: planDetails
       }
     };
@@ -224,8 +224,8 @@ app.post('/create-order', async (req, res) => {
   } catch (error) {
     console.error("Order creation error:", error);
     // Clean up initiated order in Firestore if Cashfree order creation fails
-    if (req.body.orderId && req.body.mobileNumber) {
-      const orderRef = doc(db, `users/${req.body.mobileNumber}/rechargesOrderIds/${req.body.orderId}`);
+    if (req.body.orderId && req.body.vendorMobileNumber) {
+      const orderRef = doc(db, `users/${req.body.vendorMobileNumber}/rechargesOrderIds/${req.body.orderId}`);
       await deleteDoc(orderRef).catch(e => console.error("Error deleting failed order from Firestore:", e));
       console.log(`Cleaned up initiated order ${req.body.orderId} due to Cashfree order creation failure.`);
     }
@@ -238,16 +238,16 @@ app.post('/create-order', async (req, res) => {
 
 // --- New Endpoint: Verify Payment Status from Frontend ---
 app.post('/verify', async (req, res) => {
-  const { orderId, mobileNumber } = req.body;
+  const { orderId, vendorMobileNumber } = req.body;
 
-  if (!orderId || !mobileNumber) {
-    return res.status(400).json({ success: false, message: 'orderId and mobileNumber are required.' });
+  if (!orderId || !vendorMobileNumber) {
+    return res.status(400).json({ success: false, message: 'orderId and vendorMobileNumber are required.' });
   }
 
-  const temporaryOrderRef = doc(db, `users/${mobileNumber}/rechargesOrderIds/${orderId}`);
+  const temporaryOrderRef = doc(db, `users/${vendorMobileNumber}/rechargesOrderIds/${orderId}`);
 
   try {
-    console.log(`Verifying payment for Order ID: ${orderId}, User: ${mobileNumber}`);
+    console.log(`Verifying payment for Order ID: ${orderId}, User: ${vendorMobileNumber}`);
     const cfResponse = await Cashfree.PGOrderFetchPayments("2023-08-01", orderId);
 
     console.log(`Cashfree API response 'data' for Order ID ${orderId}:`, JSON.stringify(cfResponse.data, null, 2));
@@ -267,7 +267,7 @@ app.post('/verify', async (req, res) => {
 
     if (paymentStatus === 'SUCCESS') {
       console.log(`Verification: Payment confirmed as SUCCESS for Order ID ${orderId}. Initiating processing.`);
-      const result = await processSuccessfulRecharge(orderId, mobileNumber, payment); // Pass payment details
+      const result = await processSuccessfulRecharge(orderId, vendorMobileNumber, payment); // Pass payment details
       if (result.success) {
         return res.status(200).json({ success: true, status: 'SUCCESS', message: 'Recharge successful and balance updated.' });
       } else {
@@ -288,7 +288,7 @@ app.post('/verify', async (req, res) => {
       return res.status(200).json({ success: false, status: 'UNHANDLED_STATUS', message: `Unhandled payment status: ${paymentStatus}.` });
     }
   } catch (error) {
-    console.error(`❌ Verification Error for Order ID ${orderId}, User ${mobileNumber}:`, error.message);
+    console.error(`❌ Verification Error for Order ID ${orderId}, User ${vendorMobileNumber}:`, error.message);
     // Update temporary order status to indicate an error during verification
     await setDoc(temporaryOrderRef, { status: 'VERIFICATION_ERROR', lastError: error.message, processedAt: serverTimestamp() }, { merge: true });
     return res.status(500).json({ success: false, status: 'SERVER_ERROR', message: `Server error during verification: ${error.message}` });
